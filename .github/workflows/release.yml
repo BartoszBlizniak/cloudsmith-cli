@@ -17,7 +17,7 @@ jobs:
             CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
             CLOUDSMITH_REPO: ${{ vars.CLOUDSMITH_REPO }}
             CLOUDSMITH_SVC_SLUG: ${{ vars.CLOUDSMITH_SVC_SLUG }}
-            DOCKERHUB_USER: ${{ vars.DOCKERHUB_USER }}
+            DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
         steps:
             - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
               with:
