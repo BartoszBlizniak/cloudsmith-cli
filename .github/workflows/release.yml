@@ -114,7 +114,9 @@ jobs:
                 docker buildx build \
                   --platform linux/amd64,linux/arm64 \
                   --build-arg "CLOUDSMITH_CLI_VERSION=${VERSION}" \
-                  -t "docker.cloudsmith.io/${CLOUDSMITH_NAMESPACE}/cli-zipapp/cloudsmith-cli:${VERSION}" \
+                  --build-arg "CLOUDSMITH_NAMESPACE=${CLOUDSMITH_NAMESPACE}" \
+                  --build-arg "CLOUDSMITH_REPO=${CLOUDSMITH_REPO}" \
+                  -t "docker.cloudsmith.io/${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}/cloudsmith-cli:${VERSION}" \
                   --push .
 
             - name: Push Dockerised CLI to DockerHub (multi-arch)
@@ -126,6 +128,8 @@ jobs:
                 docker buildx build \
                   --platform linux/amd64,linux/arm64 \
                   --build-arg "CLOUDSMITH_CLI_VERSION=${VERSION}" \
+                  --build-arg "CLOUDSMITH_NAMESPACE=${CLOUDSMITH_NAMESPACE}" \
+                  --build-arg "CLOUDSMITH_REPO=${CLOUDSMITH_REPO}" \
                   -t "cloudsmith/cloudsmith-cli:${VERSION}" \
                   --push .
 
