@@ -131,7 +131,7 @@ jobs:
                   --build-arg "CLOUDSMITH_CLI_VERSION=${VERSION}" \
                   --build-arg "CLOUDSMITH_NAMESPACE=${CLOUDSMITH_NAMESPACE}" \
                   --build-arg "CLOUDSMITH_REPO=${CLOUDSMITH_REPO}" \
-                  -t "cloudsmith/cloudsmith-cli:${VERSION}" \
+                  -t "${DOCKERHUB_USER}/cloudsmith-cli:${VERSION}" \
                   --push .
 
     # Publish Python packages to PyPI
