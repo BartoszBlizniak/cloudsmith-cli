@@ -12,6 +12,16 @@ test
 - Migrate from using `shiv` for zipapp generation to `pex` in order to support specific platform/arch and improve testing framework.
 - Add zizmor for GitHub Actions code scans, part of workflow and pre-commit
 
+## [1.11.0] - 2026-01-09
+
+### Added
+
+- Added Model Context Protocol (MCP) server support via `cloudsmith mcp` commands. Only STDIO transport is supported for now.
+- Auto-configure supported clients (Claude Desktop, Cursor, VS Code, Gemini CLI) with `cloudsmith mcp configure`
+- List available tools with `cloudsmith mcp list_tools` and tool groups with `cloudsmith mcp list_groups`
+- Filter tools via `mcp_allowed_tools` and `mcp_allowed_tool_groups` configuration options to control which API operations are exposed
+
+
 ## [1.10.3] - 2026-01-08
 
 ### Deprecation Notice
