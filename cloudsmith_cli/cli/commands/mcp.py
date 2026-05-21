@@ -284,6 +284,10 @@ def configure(ctx, opts, client, is_global):  # pylint: disable=unused-argument
 
 def _get_server_config(profile=None):
     """Determine the first available command configuration to run the MCP server."""
+    # PyInstaller / frozen binary: sys.executable IS the cloudsmith CLI itself,
+    # so invoke it directly rather than via `python -m cloudsmith_cli`.
+    is_frozen = getattr(sys, "frozen", False)
+
     # Check if running in a virtual environment
     in_venv = hasattr(sys, "real_prefix") or (
         hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
@@ -293,6 +297,12 @@ def _get_server_config(profile=None):
     base_args = []
     if profile:
         base_args.extend(["-P", profile])
+
+    if is_frozen:
+        return {
+            "command": sys.executable,
+            "args": base_args + ["mcp", "start"],
+        }
 
     # In a venv, always use python -m to ensure we use the venv's packages
     if in_venv:

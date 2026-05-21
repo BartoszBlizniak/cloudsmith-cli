@@ -1,0 +1,281 @@
+name: Binary PoC (PyInstaller)
+
+on:
+  push:
+    branches:
+      - binary-poc
+      - "binary-poc/**"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Bundle mode (onefile or onedir)"
+        required: false
+        default: "onefile"
+        type: choice
+        options:
+          - onefile
+          - onedir
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  PYINSTALLER_VERSION: "6.20.0"
+  CLOUDSMITH_BINARY_MODE: ${{ github.event.inputs.mode || 'onefile' }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runs-on }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64-glibc
+            runs-on: ubuntu-latest
+            shell: bash
+          - target: linux-arm64-glibc
+            runs-on: ubuntu-24.04-arm
+            shell: bash
+          - target: linux-amd64-musl
+            runs-on: ubuntu-latest
+            container: python:3.12-alpine
+            shell: sh
+          - target: linux-arm64-musl
+            runs-on: ubuntu-24.04-arm
+            container: python:3.12-alpine
+            shell: sh
+          - target: macos-arm64
+            runs-on: macos-latest
+            shell: bash
+          - target: macos-amd64
+            runs-on: macos-15-intel
+            shell: bash
+          - target: windows-amd64
+            runs-on: windows-latest
+            shell: bash
+          - target: windows-arm64
+            runs-on: windows-11-arm
+            shell: bash
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - name: Install build deps (Alpine)
+        if: contains(matrix.target, 'musl')
+        run: |
+          apk add --no-cache git bash build-base musl-dev libffi-dev openssl-dev \
+            zlib-dev binutils ca-certificates curl
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python (host)
+        if: ${{ !contains(matrix.target, 'musl') }}
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # 6.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Show Python version
+        run: |
+          python --version || python3 --version
+          python -m pip --version || python3 -m pip --version
+
+      - name: Install runtime + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+          python -m pip install "pyinstaller==${PYINSTALLER_VERSION}"
+
+      - name: Build binary
+        env:
+          CLOUDSMITH_BINARY_MODE: ${{ env.CLOUDSMITH_BINARY_MODE }}
+        run: |
+          python -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith-cli.spec
+          ls -la dist || dir dist
+
+      - name: Stage artifact (onefile, POSIX)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && !startsWith(matrix.runs-on, 'windows')
+        run: |
+          mkdir -p out
+          cp dist/cloudsmith "out/cloudsmith-${{ matrix.target }}"
+          chmod +x "out/cloudsmith-${{ matrix.target }}"
+          ls -lh out/
+
+      - name: Stage artifact (onefile, Windows)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.runs-on, 'windows')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item dist/cloudsmith.exe -Destination "out/cloudsmith-${{ matrix.target }}.exe"
+          Get-ChildItem out
+
+      - name: Stage artifact (onedir, POSIX)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onedir' && !startsWith(matrix.runs-on, 'windows')
+        run: |
+          mkdir -p out
+          tar -C dist -czf "out/cloudsmith-${{ matrix.target }}.tar.gz" cloudsmith
+          ls -lh out/
+
+      - name: Stage artifact (onedir, Windows)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onedir' && startsWith(matrix.runs-on, 'windows')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path dist/cloudsmith -DestinationPath "out/cloudsmith-${{ matrix.target }}.zip"
+          Get-ChildItem out
+
+      - name: Smoke test (POSIX, onefile)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && !startsWith(matrix.runs-on, 'windows')
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+          "$BIN" list repos --help > /dev/null
+          "$BIN" push raw --help > /dev/null
+          "$BIN" mcp --help > /dev/null
+          CLOUDSMITH_NO_KEYRING=1 "$BIN" check service
+
+      - name: Smoke test (POSIX, onedir)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onedir' && !startsWith(matrix.runs-on, 'windows')
+        run: |
+          set -eux
+          BIN="$(pwd)/dist/cloudsmith/cloudsmith"
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+          "$BIN" list repos --help > /dev/null
+          "$BIN" mcp --help > /dev/null
+          CLOUDSMITH_NO_KEYRING=1 "$BIN" check service
+
+      - name: Smoke test (Windows, onefile)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.runs-on, 'windows')
+        shell: pwsh
+        run: |
+          $bin = ".\out\cloudsmith-${{ matrix.target }}.exe"
+          & $bin --version
+          & $bin --help | Out-Null
+          & $bin list repos --help | Out-Null
+          & $bin mcp --help | Out-Null
+          $env:CLOUDSMITH_NO_KEYRING = "1"
+          & $bin check service
+
+      - name: Smoke test (Windows, onedir)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onedir' && startsWith(matrix.runs-on, 'windows')
+        shell: pwsh
+        run: |
+          $bin = ".\dist\cloudsmith\cloudsmith.exe"
+          & $bin --version
+          & $bin --help | Out-Null
+          & $bin list repos --help | Out-Null
+          & $bin mcp --help | Out-Null
+          $env:CLOUDSMITH_NO_KEYRING = "1"
+          & $bin check service
+
+      - name: No-Python validation (Linux glibc onefile)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.target, 'linux-') && !contains(matrix.target, 'musl')
+        run: |
+          docker run --rm -v "$(pwd)/out:/work" -w /work debian:stable-slim sh -c '
+            ! command -v python > /dev/null
+            ! command -v python3 > /dev/null
+            ./cloudsmith-${{ matrix.target }} --version
+            ./cloudsmith-${{ matrix.target }} --help > /dev/null
+          '
+
+      - name: No-Python validation (Linux musl onefile)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && contains(matrix.target, 'musl')
+        run: |
+          # Already in Alpine container; just strip PATH to a dir without python.
+          mkdir -p /tmp/no-py
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --version
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --help > /dev/null
+
+      - name: No-Python validation (macOS onefile)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.target, 'macos-')
+        run: |
+          mkdir -p /tmp/no-py
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --version
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --help > /dev/null
+
+      - name: No-Python validation (Windows onefile)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.runs-on, 'windows')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\no-py | Out-Null
+          $env:PATH = "C:\no-py"
+          & ".\out\cloudsmith-${{ matrix.target }}.exe" --version
+          & ".\out\cloudsmith-${{ matrix.target }}.exe" --help | Out-Null
+
+      - name: MCP stdio init (POSIX onefile)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && !startsWith(matrix.runs-on, 'windows')
+        run: |
+          set -eu
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0.1"}}}' \
+            | timeout 15 "$BIN" mcp start 2>&1 | head -5 || true
+
+      - name: Record size + startup (POSIX)
+        if: ${{ !startsWith(matrix.runs-on, 'windows') }}
+        run: |
+          if [ "${CLOUDSMITH_BINARY_MODE}" = "onefile" ]; then
+            BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+            ls -lh "$BIN"
+          else
+            BIN="$(pwd)/dist/cloudsmith/cloudsmith"
+            du -sh dist/cloudsmith
+          fi
+          for i in 1 2 3; do
+            /usr/bin/time -p "$BIN" --version 2>&1 | tail -3 || true
+          done
+
+      - name: Record size + startup (Windows)
+        if: startsWith(matrix.runs-on, 'windows')
+        shell: pwsh
+        run: |
+          if ($env:CLOUDSMITH_BINARY_MODE -eq "onefile") {
+            $bin = ".\out\cloudsmith-${{ matrix.target }}.exe"
+            Get-Item $bin | Select-Object Name,Length
+          } else {
+            $bin = ".\dist\cloudsmith\cloudsmith.exe"
+            Get-ChildItem dist\cloudsmith -Recurse | Measure-Object -Property Length -Sum | Select-Object Sum
+          }
+          1..3 | ForEach-Object { Measure-Command { & $bin --version } | Select-Object TotalSeconds }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloudsmith-${{ matrix.target }}-${{ env.CLOUDSMITH_BINARY_MODE }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  checksums:
+    name: SHA256SUMS
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -eu
+          cd dist
+          find . -type f \( -name 'cloudsmith-*' -o -name '*.tar.gz' -o -name '*.zip' \) -print0 \
+            | xargs -0 -I{} sha256sum "{}" | tee ../SHA256SUMS
+          cd ..
+          cat SHA256SUMS
+
+      - name: Upload SHA256SUMS
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: SHA256SUMS
+          path: SHA256SUMS

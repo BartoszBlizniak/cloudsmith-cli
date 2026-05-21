@@ -9,3 +9,11 @@ McClory = "McClory"
 mcclory = "mcclory"
 Clory = "Clory"
 repositor = "repositor"
+# PyInstaller API uses `datas` (plural) — not a typo.
+datas = "datas"
+
+[files]
+# PyInstaller spec uses the `datas` keyword across the entire file.
+extend-exclude = [
+    "packaging/pyinstaller/*.spec",
+]
