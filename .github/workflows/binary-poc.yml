@@ -55,10 +55,11 @@ jobs:
             runs-on: macos-15-intel
             shell: bash
           - target: windows-amd64
-            # Pin to windows-2025; GitHub is redirecting windows-latest to
-            # windows-2025-vs2026 from 2026-06-15, and we don't need the VS 2026
-            # toolchain for a Python+PyInstaller build.
-            runs-on: windows-2025
+            # GitHub is migrating both windows-latest and windows-2025 to the
+            # windows-2025-vs2026 image on 2026-06-15. Pin to the future image
+            # explicitly so the build is deterministic across the migration
+            # window and the runner annotation goes quiet.
+            runs-on: windows-2025-vs2026
             shell: bash
           - target: windows-arm64
             runs-on: windows-11-arm
