@@ -94,6 +94,13 @@ jobs:
           SCIE_PLATFORM: ${{ matrix.target.scie_platform }}
           COMPLETE_PLATFORM: ${{ matrix.target.complete_platform }}
           PBS_RELEASE: ${{ inputs.pbs_release || '20260510' }}
+          # science (PEX scie's internal lift tool) reads GitHub API to look
+          # up the PBS release tarball URL. The 60/hour unauthenticated quota
+          # is shared across the GHA macOS fleet IP pool and gets exhausted
+          # routinely; authenticate with the workflow's GITHUB_TOKEN to use
+          # the 5,000/hour authenticated quota instead.
+          # Env naming convention: SCIENCE_AUTH_<HOST-UPPER-UNDERSCORED>_BEARER
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p dist
           # OUT_BASE has no platform suffix; PEX appends --scie-platform.
@@ -148,6 +155,7 @@ jobs:
   smoke-linux-glibc-x86_64:
     name: smoke linux glibc x86_64 no-Python
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
@@ -170,6 +178,7 @@ jobs:
   smoke-linux-glibc-aarch64:
     name: smoke linux glibc aarch64 no-Python
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
@@ -191,6 +200,7 @@ jobs:
   smoke-linux-musl-x86_64:
     name: smoke linux musl x86_64 no-Python
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
@@ -213,6 +223,7 @@ jobs:
   smoke-linux-musl-aarch64:
     name: smoke linux musl aarch64 no-Python
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
@@ -234,6 +245,7 @@ jobs:
   smoke-macos-aarch64:
     name: smoke macos aarch64 no-Python
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: macos-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
@@ -291,6 +303,7 @@ jobs:
           VERSION: ${{ steps.ver.outputs.VERSION }}
           SHORT_SHA: ${{ steps.ver.outputs.SHORT_SHA }}
           PBS_RELEASE: ${{ inputs.pbs_release || '20260510' }}
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p dist
           OUT_BASE="dist/cloudsmith-${VERSION}-${SHORT_SHA}"
@@ -321,6 +334,7 @@ jobs:
   smoke-macos-x86_64:
     name: smoke macos x86_64 no-Python
     needs: build-macos-x86_64
+    if: ${{ !cancelled() }}
     runs-on: macos-13
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
@@ -343,6 +357,7 @@ jobs:
   mcp-stdio:
     name: mcp stdio handshake (linux-x86_64)
     needs: smoke-linux-glibc-x86_64
+    if: ${{ !cancelled() && needs.smoke-linux-glibc-x86_64.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
