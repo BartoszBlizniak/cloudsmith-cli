@@ -95,17 +95,18 @@ jobs:
           COMPLETE_PLATFORM: ${{ matrix.target.complete_platform }}
         run: |
           mkdir -p dist
-          # Output file basename ends with SCIE_PLATFORM so PEX produces a single
-          # file (it replaces the underlying .pex when the suffix matches).
-          # --scie-only is belt-and-suspenders: even on mismatch only the scie
-          # is kept on disk.
-          OUT="dist/cloudsmith-${VERSION}-${SHORT_SHA}-${SCIE_PLATFORM}"
+          # OUT_BASE has no platform suffix; PEX appends --scie-platform.
+          # Result file: <OUT_BASE>-<SCIE_PLATFORM>. --scie-only suppresses
+          # the underlying .pex when PEX honours it (still does not on 2.95.2
+          # for musl, so we clean up below).
+          OUT_BASE="dist/cloudsmith-${VERSION}-${SHORT_SHA}"
           ARGS=(
             .
-            --output-file "${OUT}"
+            --output-file "${OUT_BASE}"
             --console-script cloudsmith
             --scie eager
             --scie-only
+            --scie-name-style platform-file-suffix
             --scie-platform "${SCIE_PLATFORM}"
             --venv
           )
@@ -117,7 +118,21 @@ jobs:
           echo
           echo "::endgroup::"
           pex "${ARGS[@]}"
+          echo "::group::raw dist listing"
           ls -lh dist/
+          echo "::endgroup::"
+          # Force single-binary: keep the largest file (the scie), drop any
+          # intermediate .pex that PEX 2.95.2 leaves behind on musl. Cross-
+          # platform `ls -S` is reliable on both Linux and macOS runners.
+          SCIE_FILE="dist/$(ls -S dist/ | head -1)"
+          for f in dist/cloudsmith-*; do
+            [ "$f" = "$SCIE_FILE" ] && continue
+            echo "removing non-scie artifact: $f"
+            rm -f "$f"
+          done
+          echo "::group::final dist listing"
+          ls -lh dist/
+          echo "::endgroup::"
           (cd dist && shasum -a 256 cloudsmith-* > "cloudsmith-${VERSION}-${SHORT_SHA}-${TARGET}.sha256")
 
       - name: Upload artifact
@@ -141,7 +156,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
           echo "Binary under test: ${BIN_NAME}"
           docker run --rm -v "$PWD/bin:/work" -w /work debian:stable-slim sh -c "
             if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
@@ -163,7 +178,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
           echo "Binary under test: ${BIN_NAME}"
           docker run --rm --platform linux/arm64 -v "$PWD/bin:/work" -w /work debian:stable-slim sh -c "
             if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
@@ -184,7 +199,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
           echo "Binary under test: ${BIN_NAME}"
           docker run --rm -v "$PWD/bin:/work" -w /work alpine:latest sh -c "
             if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
@@ -206,7 +221,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
           echo "Binary under test: ${BIN_NAME}"
           docker run --rm --platform linux/arm64 -v "$PWD/bin:/work" -w /work alpine:latest sh -c "
             if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
@@ -235,7 +250,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
           echo "Binary under test: ${BIN_NAME}"
           mkdir -p /tmp/no-python
           export PATH=/tmp/no-python
@@ -257,7 +272,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
           echo "Binary under test: ${BIN_NAME}"
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0"}}}'
           OUT=$(printf '%s\n' "$INIT" | timeout 15 ./bin/"${BIN_NAME}" mcp start 2>/tmp/mcp.stderr || true)
