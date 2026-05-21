@@ -37,12 +37,12 @@ jobs:
             ext: ''
           - name: linux-x86_64-musl
             runner: ubuntu-latest
-            scie_platform: linux-x86_64-musl
+            scie_platform: musl-linux-x86_64
             complete_platform: linux-x86_64-musl-py312
             ext: ''
           - name: linux-aarch64-musl
             runner: ubuntu-24.04-arm
-            scie_platform: linux-aarch64-musl
+            scie_platform: musl-linux-aarch64
             complete_platform: linux-aarch64-musl-py312
             ext: ''
           - name: macos-x86_64
@@ -78,6 +78,7 @@ jobs:
           python-version: ${{ inputs.python_version || '3.12' }}
 
       - name: Install PEX
+        shell: bash
         env:
           PEX_VERSION: ${{ inputs.pex_version || '2.95.2' }}
         run: |
