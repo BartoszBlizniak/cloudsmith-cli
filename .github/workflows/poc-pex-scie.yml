@@ -11,6 +11,10 @@ on:
         description: 'Build interpreter Python version'
         required: false
         default: '3.12'
+      pbs_release:
+        description: 'python-build-standalone release tag'
+        required: false
+        default: '20260510'
   push:
     branches:
       - 'poc/pex-scie'
@@ -89,6 +93,7 @@ jobs:
           TARGET: ${{ matrix.target.name }}
           SCIE_PLATFORM: ${{ matrix.target.scie_platform }}
           COMPLETE_PLATFORM: ${{ matrix.target.complete_platform }}
+          PBS_RELEASE: ${{ inputs.pbs_release || '20260510' }}
         run: |
           mkdir -p dist
           # OUT_BASE has no platform suffix; PEX appends --scie-platform.
@@ -103,6 +108,7 @@ jobs:
             --scie eager
             --scie-only
             --scie-name-style platform-file-suffix
+            --scie-pbs-release "${PBS_RELEASE}"
             --scie-platform "${SCIE_PLATFORM}"
             --venv
           )
@@ -284,6 +290,7 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.VERSION }}
           SHORT_SHA: ${{ steps.ver.outputs.SHORT_SHA }}
+          PBS_RELEASE: ${{ inputs.pbs_release || '20260510' }}
         run: |
           mkdir -p dist
           OUT_BASE="dist/cloudsmith-${VERSION}-${SHORT_SHA}"
@@ -293,6 +300,7 @@ jobs:
             --scie eager \
             --scie-only \
             --scie-name-style platform-file-suffix \
+            --scie-pbs-release "${PBS_RELEASE}" \
             --scie-platform macos-x86_64 \
             --venv
           ls -lh dist/
