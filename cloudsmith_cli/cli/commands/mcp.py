@@ -282,17 +282,34 @@ def configure(ctx, opts, client, is_global):  # pylint: disable=unused-argument
         click.echo(click.style("\n✗ No clients were configured successfully", fg="red"))
 
 
-def _get_server_config(profile=None):
-    """Determine the first available command configuration to run the MCP server."""
-    # Check if running in a virtual environment
-    in_venv = hasattr(sys, "real_prefix") or (
-        hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
+def _is_frozen():
+    """Detect if running from a frozen/packaged binary (PEX scie, PyInstaller, Nuitka)."""
+    return (
+        getattr(sys, "frozen", False)
+        or "PEX" in os.environ
+        or os.environ.get("SCIE") is not None
+        or os.environ.get("PEX_SCIE_BOOT") is not None
     )
 
+
+def _get_server_config(profile=None):
+    """Determine the first available command configuration to run the MCP server."""
     # Build the base args
     base_args = []
     if profile:
         base_args.extend(["-P", profile])
+
+    # Frozen binary: point clients at the binary itself, never python -m.
+    if _is_frozen():
+        return {
+            "command": str(Path(sys.argv[0]).resolve()),
+            "args": base_args + ["mcp", "start"],
+        }
+
+    # Check if running in a virtual environment
+    in_venv = hasattr(sys, "real_prefix") or (
+        hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
+    )
 
     # In a venv, always use python -m to ensure we use the venv's packages
     if in_venv:

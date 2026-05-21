@@ -1,0 +1,17 @@
+# Runtime-only dependencies (mirrors setup.py install_requires).
+# Used by PEX scie / PyInstaller builds so the frozen binary does not ship
+# dev tooling (pytest, pylint, freezegun, etc.) from requirements.in.
+click>=8.1.8,!=8.3.0
+click-configfile>=0.2.3
+click-didyoumean>=0.0.3
+click-spinner>=0.1.7
+json5>=0.9.0
+cloudsmith-api>=2.0.25,<3.0
+keyring>=25.4.1
+mcp==1.9.1
+python-toon==0.1.2
+requests>=2.18.4
+requests_toolbelt>=1.0.0
+rich>=13.0.0
+semver>=2.7.9
+urllib3>=2.5

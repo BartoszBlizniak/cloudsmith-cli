@@ -40,7 +40,7 @@ setup(
     description="Cloudsmith Command-Line Interface (CLI)",
     long_description=get_long_description(),
     long_description_content_type="text/markdown",
-    packages=find_packages(exclude=["tests"]),
+    packages=find_packages(exclude=["tests", "tests.*", "*.tests", "*.tests.*"]),
     package_data={
         "cloudsmith_cli": ["cloudsmith_cli/data/*", "cloudsmith_cli/templates/*"]
     },
