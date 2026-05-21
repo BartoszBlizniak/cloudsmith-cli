@@ -43,10 +43,11 @@ jobs:
             runs-on: ubuntu-latest
             container: python:3.12-alpine
             shell: sh
-          - target: linux-arm64-musl
-            runs-on: ubuntu-24.04-arm
-            container: python:3.12-alpine
-            shell: sh
+          # linux-arm64-musl is split into its own job below: GitHub Actions
+          # JS actions don't run inside Alpine containers on ARM64 runners
+          # ("JavaScript Actions in Alpine containers are only supported on
+          # x64 Linux runners"), so we bypass the container: field and use
+          # docker run from the host runner instead.
           - target: macos-arm64
             runs-on: macos-latest
             shell: bash
@@ -255,9 +256,67 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-linux-arm64-musl:
+    name: build (linux-arm64-musl)
+    runs-on: ubuntu-24.04-arm
+    env:
+      TARGET: linux-arm64-musl
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build + smoke-test in Alpine container
+        run: |
+          set -eux
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/work" -w /work \
+            -e CLOUDSMITH_BINARY_MODE \
+            -e PYINSTALLER_VERSION \
+            -e TARGET \
+            python:3.12-alpine sh -eux -c '
+              apk add --no-cache git bash build-base musl-dev libffi-dev \
+                openssl-dev zlib-dev binutils ca-certificates curl
+              python -m pip install --upgrade pip
+              python -m pip install -r requirements.txt
+              python -m pip install -e .
+              python -m pip install "pyinstaller==${PYINSTALLER_VERSION}"
+              python -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith-cli.spec
+              ls -la dist
+              if [ "${CLOUDSMITH_BINARY_MODE}" = "onefile" ]; then
+                mkdir -p out
+                cp dist/cloudsmith "out/cloudsmith-${TARGET}"
+                chmod +x "out/cloudsmith-${TARGET}"
+                BIN="$(pwd)/out/cloudsmith-${TARGET}"
+              else
+                mkdir -p out
+                tar -C dist -czf "out/cloudsmith-${TARGET}.tar.gz" cloudsmith
+                BIN="$(pwd)/dist/cloudsmith/cloudsmith"
+              fi
+              "$BIN" --version
+              "$BIN" --help > /dev/null
+              "$BIN" list repos --help > /dev/null
+              "$BIN" mcp --help > /dev/null
+              CLOUDSMITH_NO_KEYRING=1 "$BIN" check service
+              mkdir -p /tmp/no-py
+              env -i PATH=/tmp/no-py HOME=/tmp "$BIN" --version
+              env -i PATH=/tmp/no-py HOME=/tmp "$BIN" --help > /dev/null
+              for i in 1 2 3; do
+                /usr/bin/time -p "$BIN" --version 2>&1 | tail -3 || true
+              done
+            '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloudsmith-linux-arm64-musl-${{ env.CLOUDSMITH_BINARY_MODE }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
   checksums:
     name: SHA256SUMS
-    needs: build
+    needs: [build, build-linux-arm64-musl]
     if: always()
     runs-on: ubuntu-latest
     steps:
