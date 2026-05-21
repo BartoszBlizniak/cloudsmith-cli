@@ -18,6 +18,12 @@ on:
 permissions:
   contents: read
 
+# PEX 2.95.2 supports linux glibc/musl × {x86_64, aarch64} and macOS × {x86_64,
+# aarch64} via --scie-platform. Windows scie targets are EXCLUDED in
+# pex/scie/__init__.py at choices=[...] — confirmed at pex@main on 2026-05-21.
+# Windows binaries require a separate path (e.g. PyInstaller 6.20) and are out
+# of scope for this PoC.
+
 jobs:
   build:
     name: build (${{ matrix.target.name }})
@@ -29,42 +35,26 @@ jobs:
             runner: ubuntu-latest
             scie_platform: linux-x86_64
             complete_platform: linux-x86_64-py312
-            ext: ''
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
             scie_platform: linux-aarch64
             complete_platform: linux-aarch64-py312
-            ext: ''
-          - name: linux-x86_64-musl
+          - name: musl-linux-x86_64
             runner: ubuntu-latest
             scie_platform: musl-linux-x86_64
             complete_platform: linux-x86_64-musl-py312
-            ext: ''
-          - name: linux-aarch64-musl
+          - name: musl-linux-aarch64
             runner: ubuntu-24.04-arm
             scie_platform: musl-linux-aarch64
             complete_platform: linux-aarch64-musl-py312
-            ext: ''
           - name: macos-x86_64
             runner: macos-13
             scie_platform: macos-x86_64
             complete_platform: ''
-            ext: ''
           - name: macos-aarch64
             runner: macos-latest
             scie_platform: macos-aarch64
             complete_platform: ''
-            ext: ''
-          - name: windows-x86_64
-            runner: windows-latest
-            scie_platform: windows-x86_64
-            complete_platform: ''
-            ext: '.exe'
-          - name: windows-aarch64
-            runner: windows-11-arm
-            scie_platform: windows-aarch64
-            complete_platform: ''
-            ext: '.exe'
     runs-on: ${{ matrix.target.runner }}
     steps:
       - name: Checkout
@@ -90,11 +80,12 @@ jobs:
         shell: bash
         run: |
           VERSION=$(cat cloudsmith_cli/data/VERSION)
-          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          {
+            echo "VERSION=${VERSION}"
+            echo "SHORT_SHA=${GITHUB_SHA:0:7}"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build PEX scie (Unix)
-        if: runner.os != 'Windows'
+      - name: Build PEX scie
         shell: bash
         env:
           VERSION: ${{ steps.ver.outputs.VERSION }}
@@ -102,11 +93,22 @@ jobs:
           TARGET: ${{ matrix.target.name }}
           SCIE_PLATFORM: ${{ matrix.target.scie_platform }}
           COMPLETE_PLATFORM: ${{ matrix.target.complete_platform }}
-          EXT: ${{ matrix.target.ext }}
         run: |
           mkdir -p dist
-          OUT="dist/cloudsmith-${VERSION}-${SHORT_SHA}-${TARGET}${EXT}"
-          ARGS=(. --output-file "${OUT}" --console-script cloudsmith --scie eager --scie-platform "${SCIE_PLATFORM}" --venv)
+          # Output file basename ends with SCIE_PLATFORM so PEX produces a single
+          # file (it replaces the underlying .pex when the suffix matches).
+          # --scie-only is belt-and-suspenders: even on mismatch only the scie
+          # is kept on disk.
+          OUT="dist/cloudsmith-${VERSION}-${SHORT_SHA}-${SCIE_PLATFORM}"
+          ARGS=(
+            .
+            --output-file "${OUT}"
+            --console-script cloudsmith
+            --scie eager
+            --scie-only
+            --scie-platform "${SCIE_PLATFORM}"
+            --venv
+          )
           if [ -n "${COMPLETE_PLATFORM}" ]; then
             ARGS+=(--complete-platform ".github/.platforms/${COMPLETE_PLATFORM}.json")
           fi
@@ -116,29 +118,7 @@ jobs:
           echo "::endgroup::"
           pex "${ARGS[@]}"
           ls -lh dist/
-          # The --scie-platform adds a platform suffix in some cases; capture all artifacts
           (cd dist && shasum -a 256 cloudsmith-* > "cloudsmith-${VERSION}-${SHORT_SHA}-${TARGET}.sha256")
-
-      - name: Build PEX scie (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          VERSION: ${{ steps.ver.outputs.VERSION }}
-          SHORT_SHA: ${{ steps.ver.outputs.SHORT_SHA }}
-          TARGET: ${{ matrix.target.name }}
-          SCIE_PLATFORM: ${{ matrix.target.scie_platform }}
-          EXT: ${{ matrix.target.ext }}
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $OUT = "dist/cloudsmith-$env:VERSION-$env:SHORT_SHA-$env:TARGET$env:EXT"
-          Write-Host "Running: pex . --output-file $OUT --console-script cloudsmith --scie eager --scie-platform $env:SCIE_PLATFORM --venv"
-          pex . --output-file $OUT --console-script cloudsmith --scie eager --scie-platform $env:SCIE_PLATFORM --venv
-          Get-ChildItem dist
-          $hashFile = "dist/cloudsmith-$env:VERSION-$env:SHORT_SHA-$env:TARGET.sha256"
-          Get-ChildItem dist/cloudsmith-* | Where-Object { $_.Extension -ne '.sha256' } | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($_.Name)"
-          } | Out-File -Encoding ascii $hashFile
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -148,8 +128,8 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-  smoke-linux-glibc:
-    name: smoke linux glibc no-Python
+  smoke-linux-glibc-x86_64:
+    name: smoke linux glibc x86_64 no-Python
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -157,16 +137,37 @@ jobs:
         with:
           name: cloudsmith-linux-x86_64
           path: ./bin
-      - name: No-Python validation in debian:stable-slim
+      - name: Validate in debian:stable-slim (no Python on host)
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN=$(ls ./bin/cloudsmith-* | grep -v sha256 | head -1)
-          BIN_NAME=$(basename "$BIN")
+          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          echo "Binary under test: ${BIN_NAME}"
           docker run --rm -v "$PWD/bin:/work" -w /work debian:stable-slim sh -c "
             if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
             ./${BIN_NAME} --version
             ./${BIN_NAME} --help > /dev/null
+            ./${BIN_NAME} mcp --help > /dev/null
+          "
+
+  smoke-linux-glibc-aarch64:
+    name: smoke linux glibc aarch64 no-Python
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
+        with:
+          name: cloudsmith-linux-aarch64
+          path: ./bin
+      - name: Validate in debian:stable-slim/arm64 (no Python on host)
+        shell: bash
+        run: |
+          chmod +x ./bin/cloudsmith-*
+          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          echo "Binary under test: ${BIN_NAME}"
+          docker run --rm --platform linux/arm64 -v "$PWD/bin:/work" -w /work debian:stable-slim sh -c "
+            if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
+            ./${BIN_NAME} --version
             ./${BIN_NAME} mcp --help > /dev/null
           "
 
@@ -177,14 +178,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
         with:
-          name: cloudsmith-linux-x86_64-musl
+          name: cloudsmith-musl-linux-x86_64
           path: ./bin
-      - name: No-Python Alpine validation (pydantic-core load test)
+      - name: Validate on Alpine (pydantic-core load test)
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN=$(ls ./bin/cloudsmith-* | grep -v sha256 | head -1)
-          BIN_NAME=$(basename "$BIN")
+          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          echo "Binary under test: ${BIN_NAME}"
           docker run --rm -v "$PWD/bin:/work" -w /work alpine:latest sh -c "
             if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
             ./${BIN_NAME} --version
@@ -199,36 +200,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
         with:
-          name: cloudsmith-linux-aarch64-musl
+          name: cloudsmith-musl-linux-aarch64
           path: ./bin
-      - name: No-Python Alpine aarch64 validation
+      - name: Validate on Alpine aarch64 (pydantic-core load test)
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN=$(ls ./bin/cloudsmith-* | grep -v sha256 | head -1)
-          BIN_NAME=$(basename "$BIN")
+          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          echo "Binary under test: ${BIN_NAME}"
           docker run --rm --platform linux/arm64 -v "$PWD/bin:/work" -w /work alpine:latest sh -c "
-            if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
-            ./${BIN_NAME} --version
-            ./${BIN_NAME} mcp --help > /dev/null
-          "
-
-  smoke-linux-aarch64-glibc:
-    name: smoke linux glibc aarch64 no-Python
-    needs: build
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
-        with:
-          name: cloudsmith-linux-aarch64
-          path: ./bin
-      - name: No-Python debian aarch64 validation
-        shell: bash
-        run: |
-          chmod +x ./bin/cloudsmith-*
-          BIN=$(ls ./bin/cloudsmith-* | grep -v sha256 | head -1)
-          BIN_NAME=$(basename "$BIN")
-          docker run --rm --platform linux/arm64 -v "$PWD/bin:/work" -w /work debian:stable-slim sh -c "
             if command -v python3 >/dev/null 2>&1; then echo 'Python on host, test invalid'; exit 1; fi
             ./${BIN_NAME} --version
             ./${BIN_NAME} mcp --help > /dev/null
@@ -251,71 +231,40 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ./bin
-      - name: No-Python macOS validation
+      - name: Validate without Python on PATH
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN=$(ls ./bin/cloudsmith-* | grep -v sha256 | head -1)
-          # Strip Python from PATH; binary must run without host interpreter.
+          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          echo "Binary under test: ${BIN_NAME}"
           mkdir -p /tmp/no-python
           export PATH=/tmp/no-python
           if command -v python3 >/dev/null 2>&1; then echo "python3 still in PATH"; exit 1; fi
-          ./"$BIN" --version
-          ./"$BIN" --help > /dev/null
-          ./"$BIN" mcp --help > /dev/null
-
-  smoke-windows:
-    name: smoke windows no-Python (${{ matrix.artifact }})
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - artifact: cloudsmith-windows-x86_64
-            runner: windows-latest
-          - artifact: cloudsmith-windows-aarch64
-            runner: windows-11-arm
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
-        with:
-          name: ${{ matrix.artifact }}
-          path: .\bin
-      - name: No-Python Windows validation
-        shell: pwsh
-        run: |
-          $bin = Get-ChildItem .\bin\cloudsmith-*.exe | Where-Object { $_.Extension -eq '.exe' } | Select-Object -First 1
-          if (-not $bin) { Write-Error 'No .exe found'; exit 1 }
-          # GitHub Windows runners ship Python on PATH. Strip it.
-          $env:PATH = "C:\Windows\System32;C:\Windows"
-          $py = (Get-Command python -ErrorAction SilentlyContinue)
-          if ($py) { Write-Error "Python still on PATH at $($py.Source)"; exit 1 }
-          & $bin.FullName --version
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $bin.FullName --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $bin.FullName mcp --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          ./bin/"${BIN_NAME}" --version
+          ./bin/"${BIN_NAME}" --help > /dev/null
+          ./bin/"${BIN_NAME}" mcp --help > /dev/null
 
   mcp-stdio:
     name: mcp stdio handshake (linux-x86_64)
-    needs: smoke-linux-glibc
+    needs: smoke-linux-glibc-x86_64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b6d4604ae8881dac2b5c2bd6 # v4.3.0
         with:
           name: cloudsmith-linux-x86_64
           path: ./bin
-      - name: MCP initialize handshake (no API key needed)
+      - name: Send MCP initialize request
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
-          BIN=$(ls ./bin/cloudsmith-* | grep -v sha256 | head -1)
-          # send initialize, capture first line of stdout, assert jsonrpc envelope
+          BIN_NAME=$(ls ./bin/cloudsmith-* | grep -v sha256 | xargs -n1 basename)
+          echo "Binary under test: ${BIN_NAME}"
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0"}}}'
-          OUT=$(printf '%s\n' "$INIT" | timeout 15 ./"$BIN" mcp start 2>/tmp/mcp.stderr || true)
-          echo "stdout:"; echo "$OUT" | head -5
-          echo "stderr:"; cat /tmp/mcp.stderr | head -20
+          OUT=$(printf '%s\n' "$INIT" | timeout 15 ./bin/"${BIN_NAME}" mcp start 2>/tmp/mcp.stderr || true)
+          echo "stdout (first 5 lines):"
+          echo "$OUT" | head -5
+          echo "stderr (first 20 lines):"
+          head -20 /tmp/mcp.stderr || true
           echo "$OUT" | head -1 | grep -q '"jsonrpc":"2.0"' || { echo 'No jsonrpc envelope in first line'; exit 1; }
 
   summary:
@@ -323,12 +272,11 @@ jobs:
     if: always()
     needs:
       - build
-      - smoke-linux-glibc
-      - smoke-linux-aarch64-glibc
+      - smoke-linux-glibc-x86_64
+      - smoke-linux-glibc-aarch64
       - smoke-linux-musl-x86_64
       - smoke-linux-musl-aarch64
       - smoke-macos
-      - smoke-windows
       - mcp-stdio
     runs-on: ubuntu-latest
     steps:
@@ -336,25 +284,26 @@ jobs:
         shell: bash
         env:
           R_BUILD: ${{ needs.build.result }}
-          R_LIN_GLIBC: ${{ needs.smoke-linux-glibc.result }}
-          R_LIN_ARM_GLIBC: ${{ needs.smoke-linux-aarch64-glibc.result }}
+          R_LIN_GLIBC_X86: ${{ needs.smoke-linux-glibc-x86_64.result }}
+          R_LIN_GLIBC_ARM: ${{ needs.smoke-linux-glibc-aarch64.result }}
           R_LIN_MUSL_X86: ${{ needs.smoke-linux-musl-x86_64.result }}
           R_LIN_MUSL_ARM: ${{ needs.smoke-linux-musl-aarch64.result }}
           R_MACOS: ${{ needs.smoke-macos.result }}
-          R_WIN: ${{ needs.smoke-windows.result }}
           R_MCP: ${{ needs.mcp-stdio.result }}
         run: |
           {
             echo "## PoC PEX-scie matrix"
             echo ""
+            echo "Windows targets EXCLUDED: PEX 2.95.2 does not currently"
+            echo "support \`--scie-platform windows-*\`. See workflow header."
+            echo ""
             echo "| Job | Result |"
             echo "|-----|--------|"
             echo "| build | ${R_BUILD} |"
-            echo "| smoke-linux-glibc | ${R_LIN_GLIBC} |"
-            echo "| smoke-linux-aarch64-glibc | ${R_LIN_ARM_GLIBC} |"
+            echo "| smoke-linux-glibc-x86_64 | ${R_LIN_GLIBC_X86} |"
+            echo "| smoke-linux-glibc-aarch64 | ${R_LIN_GLIBC_ARM} |"
             echo "| smoke-linux-musl-x86_64 | ${R_LIN_MUSL_X86} |"
             echo "| smoke-linux-musl-aarch64 | ${R_LIN_MUSL_ARM} |"
             echo "| smoke-macos | ${R_MACOS} |"
-            echo "| smoke-windows | ${R_WIN} |"
             echo "| mcp-stdio | ${R_MCP} |"
           } >> "$GITHUB_STEP_SUMMARY"
