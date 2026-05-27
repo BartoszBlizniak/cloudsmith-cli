@@ -285,11 +285,10 @@ jobs:
         shell: bash
         run: |
           BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
-          mkdir -p /tmp/no-python
-          export PATH=/tmp/no-python
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0"}}}'
-          # head -1 reads first line then closes pipe → SIGPIPE terminates
-          # the mcp server. GH step timeout above is a hard ceiling.
+          # Earlier step already proved `mcp --help` runs without python3 on
+          # PATH; here keep the GH-runner PATH so coreutils stay available
+          # and rely on `head -1` SIGPIPE to terminate the mcp server.
           set +o pipefail
           OUT=$(printf '%s\n' "$INIT" | ./bin/"${BIN_NAME}" mcp start 2>/tmp/mcp.stderr | head -1)
           set -o pipefail
