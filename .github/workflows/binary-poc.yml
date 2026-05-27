@@ -23,12 +23,63 @@ env:
   PYTHON_VERSION: "3.12"
   PYINSTALLER_VERSION: "6.20.0"
   CLOUDSMITH_BINARY_MODE: ${{ github.event.inputs.mode || 'onefile' }}
+  # Test repo for push/pull e2e (#6). Job-level steps skip themselves if either
+  # the API key secret or the namespace var is unset (e.g. fork without secrets).
+  TEST_REPO_SLUG: binary-poc
 
 jobs:
+  setup-test-repo:
+    name: Ensure $CLOUDSMITH_NAMESPACE/binary-poc raw repo exists
+    runs-on: ubuntu-latest
+    if: ${{ vars.CLOUDSMITH_NAMESPACE != '' }}
+    env:
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+      CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+      CLOUDSMITH_NO_KEYRING: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CLI from source
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Create binary-poc repo if missing
+        env:
+          REPO: ${{ env.TEST_REPO_SLUG }}
+        run: |
+          set -eu
+          if cloudsmith list repos "${CLOUDSMITH_NAMESPACE}/${REPO}" -F json 2>/dev/null \
+              | grep -q "\"slug\": \"${REPO}\""; then
+            echo "Repo ${CLOUDSMITH_NAMESPACE}/${REPO} already exists, skipping create."
+            exit 0
+          fi
+          echo "Repo ${CLOUDSMITH_NAMESPACE}/${REPO} not found, creating."
+          cat > /tmp/repo-config.json <<EOF
+          {
+            "name": "${REPO}",
+            "description": "Cloudsmith CLI binary PoC test repo (autocreated by binary-poc.yml).",
+            "repository_type_str": "Public",
+            "slug": "${REPO}"
+          }
+          EOF
+          cloudsmith repos create "${CLOUDSMITH_NAMESPACE}" /tmp/repo-config.json
+
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.runs-on }}
     container: ${{ matrix.container }}
+    needs: [setup-test-repo]
+    # Allow build to run even when setup-test-repo is skipped (no secrets);
+    # the auth e2e + keyring secret-dependent steps gate themselves further down.
+    if: ${{ always() && (needs.setup-test-repo.result == 'success' || needs.setup-test-repo.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -147,6 +198,7 @@ jobs:
           "$BIN" push raw --help > /dev/null
           "$BIN" mcp --help > /dev/null
           CLOUDSMITH_NO_KEYRING=1 "$BIN" check service
+          "$BIN" check cryptography-selftest
 
       - name: Smoke test (POSIX, onedir)
         if: env.CLOUDSMITH_BINARY_MODE == 'onedir' && !startsWith(matrix.runs-on, 'windows')
@@ -158,6 +210,7 @@ jobs:
           "$BIN" list repos --help > /dev/null
           "$BIN" mcp --help > /dev/null
           CLOUDSMITH_NO_KEYRING=1 "$BIN" check service
+          "$BIN" check cryptography-selftest
 
       - name: Smoke test (Windows, onefile)
         if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.runs-on, 'windows')
@@ -170,6 +223,8 @@ jobs:
           & $bin mcp --help | Out-Null
           $env:CLOUDSMITH_NO_KEYRING = "1"
           & $bin check service
+          & $bin check cryptography-selftest
+          if ($LASTEXITCODE -ne 0) { throw "cryptography-selftest failed: $LASTEXITCODE" }
 
       - name: Smoke test (Windows, onedir)
         if: env.CLOUDSMITH_BINARY_MODE == 'onedir' && startsWith(matrix.runs-on, 'windows')
@@ -182,6 +237,8 @@ jobs:
           & $bin mcp --help | Out-Null
           $env:CLOUDSMITH_NO_KEYRING = "1"
           & $bin check service
+          & $bin check cryptography-selftest
+          if ($LASTEXITCODE -ne 0) { throw "cryptography-selftest failed: $LASTEXITCODE" }
 
       - name: No-Python validation (Linux glibc onefile)
         if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.target, 'linux-') && !contains(matrix.target, 'musl')
@@ -225,6 +282,121 @@ jobs:
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0.1"}}}' \
             | timeout 15 "$BIN" mcp start 2>&1 | head -5 || true
 
+      # Q#5 keyring round-trip — synthetic set/get/delete via hidden
+      # `check keyring-selftest` subcommand. Real keyring usage is only on the
+      # SSO browser flow (not scriptable in CI), so the selftest is the only
+      # non-interactive proof that the chosen backend works per OS.
+      - name: Keyring round-trip (Linux glibc)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.target, 'linux-') && contains(matrix.target, 'glibc')
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          sudo apt-get update -y
+          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0
+          # `dbus-run-session` provides a fresh session bus; gnome-keyring-daemon
+          # unlocks with an empty password (no login keyring yet) and serves the
+          # SecretService API for `secretstorage` → `keyring` to call.
+          export CLOUDSMITH_BIN="$BIN"
+          dbus-run-session -- bash -eux -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets &
+            sleep 1
+            "$CLOUDSMITH_BIN" check keyring-selftest
+          '
+
+      - name: Keyring graceful degradation (Linux musl)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && contains(matrix.target, 'musl')
+        run: |
+          set +e
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          # Alpine has no Secret Service daemon by default; selftest is expected
+          # to exit non-zero. Capture stderr to confirm the failure is a clean
+          # KeyringError, not a crash. Then verify the documented fallback
+          # (CLOUDSMITH_NO_KEYRING=1) still works.
+          "$BIN" check keyring-selftest > /tmp/keyring-out.txt 2>&1
+          rc=$?
+          echo "selftest exit=$rc; output:"
+          cat /tmp/keyring-out.txt
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "INFO: selftest passed on musl — backend is file-based (keyrings.alt installed)."
+          else
+            grep -qE "(NoKeyringError|FAIL: keyring)" /tmp/keyring-out.txt \
+              || { echo "expected NoKeyringError or FAIL marker, got something else"; exit 1; }
+          fi
+          CLOUDSMITH_NO_KEYRING=1 "$BIN" check service
+
+      - name: Keyring round-trip (macOS)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.target, 'macos-')
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          # Confirm a usable keychain is present + unlocked (CI runners ship
+          # `runner` user with an unlocked login keychain by default). Signed
+          # builds get different ACLs; this test exercises the unsigned path
+          # only — signed retest is blocked on Q#16 (Apple Developer ID).
+          security list-keychains -d user
+          "$BIN" check keyring-selftest
+
+      - name: Keyring round-trip (Windows)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.runs-on, 'windows')
+        shell: pwsh
+        run: |
+          $bin = ".\out\cloudsmith-${{ matrix.target }}.exe"
+          & $bin check keyring-selftest
+          if ($LASTEXITCODE -ne 0) { throw "keyring-selftest failed: $LASTEXITCODE" }
+
+      # Q#6 push/pull e2e — proves the frozen binary speaks the full HTTP
+      # stack (multipart upload, auth, pagination). Skips itself if either
+      # the API key secret or namespace var is absent (e.g. PR from external
+      # fork without secrets exposed).
+      - name: Push/pull e2e (POSIX)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && !startsWith(matrix.runs-on, 'windows') && vars.CLOUDSMITH_NAMESPACE != ''
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+          CLOUDSMITH_NO_KEYRING: "1"
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          PKG_NAME="fixture-${{ matrix.target }}.txt"
+          PKG_VER="${GITHUB_RUN_ID}"
+          mkdir -p e2e
+          cd e2e
+          printf 'binary-poc fixture\ntarget=%s\nrun=%s\ndate=%s\n' \
+            "${{ matrix.target }}" "${GITHUB_RUN_ID}" "$(date -u +%FT%TZ)" > "${PKG_NAME}"
+          # Default push waits for sync (-W disables that), then we wait a bit
+          # ourselves so the file is actually retrievable by download below.
+          "$BIN" push raw "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+            --name "${PKG_NAME}" --version "${PKG_VER}"
+          "$BIN" download "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+            --version "${PKG_VER}" --outfile "downloaded-${PKG_NAME}" --yes
+          cmp "${PKG_NAME}" "downloaded-${PKG_NAME}"
+          echo "Push/pull e2e PASS for ${{ matrix.target }}"
+
+      - name: Push/pull e2e (Windows)
+        if: env.CLOUDSMITH_BINARY_MODE == 'onefile' && startsWith(matrix.runs-on, 'windows') && vars.CLOUDSMITH_NAMESPACE != ''
+        shell: pwsh
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+          CLOUDSMITH_NO_KEYRING: "1"
+        run: |
+          $bin = ".\out\cloudsmith-${{ matrix.target }}.exe"
+          $pkgName = "fixture-${{ matrix.target }}.txt"
+          $pkgVer = "$env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Force e2e | Out-Null
+          Set-Location e2e
+          "binary-poc fixture target=${{ matrix.target }} run=$env:GITHUB_RUN_ID date=$(Get-Date -Format o)" `
+            | Out-File -Encoding ascii $pkgName
+          & $bin push raw "$env:CLOUDSMITH_NAMESPACE/$env:TEST_REPO_SLUG" $pkgName --name $pkgName --version $pkgVer
+          if ($LASTEXITCODE -ne 0) { throw "push failed: $LASTEXITCODE" }
+          & $bin download "$env:CLOUDSMITH_NAMESPACE/$env:TEST_REPO_SLUG" $pkgName --version $pkgVer --outfile "downloaded-$pkgName" --yes
+          if ($LASTEXITCODE -ne 0) { throw "download failed: $LASTEXITCODE" }
+          $a = (Get-FileHash $pkgName -Algorithm SHA256).Hash
+          $b = (Get-FileHash "downloaded-$pkgName" -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "Content mismatch: $a vs $b" }
+          Write-Host "Push/pull e2e PASS for ${{ matrix.target }}"
+
       - name: Record size + startup (POSIX)
         if: ${{ !startsWith(matrix.runs-on, 'windows') }}
         run: |
@@ -263,8 +435,12 @@ jobs:
   build-linux-arm64-musl:
     name: build (linux-arm64-musl)
     runs-on: ubuntu-24.04-arm
+    needs: [setup-test-repo]
+    if: ${{ always() && (needs.setup-test-repo.result == 'success' || needs.setup-test-repo.result == 'skipped') }}
     env:
       TARGET: linux-arm64-musl
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+      CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -278,9 +454,13 @@ jobs:
             -e CLOUDSMITH_BINARY_MODE \
             -e PYINSTALLER_VERSION \
             -e TARGET \
+            -e CLOUDSMITH_API_KEY \
+            -e CLOUDSMITH_NAMESPACE \
+            -e TEST_REPO_SLUG \
+            -e GITHUB_RUN_ID \
             python:3.12-alpine sh -eux -c '
               apk add --no-cache git bash build-base musl-dev libffi-dev \
-                openssl-dev zlib-dev binutils ca-certificates curl
+                openssl-dev zlib-dev binutils ca-certificates curl coreutils
               python -m pip install --upgrade pip
               python -m pip install -r requirements.txt
               python -m pip install -e .
@@ -302,6 +482,37 @@ jobs:
               "$BIN" list repos --help > /dev/null
               "$BIN" mcp --help > /dev/null
               CLOUDSMITH_NO_KEYRING=1 "$BIN" check service
+              "$BIN" check cryptography-selftest
+              # Q#5 graceful keyring degradation on Alpine (no Secret Service).
+              set +e
+              "$BIN" check keyring-selftest > /tmp/keyring-out.txt 2>&1
+              rc=$?
+              set -e
+              echo "keyring-selftest exit=$rc; output:"
+              cat /tmp/keyring-out.txt
+              if [ "$rc" -eq 0 ]; then
+                echo "INFO: musl keyring passed — likely file backend via keyrings.alt."
+              else
+                grep -qE "(NoKeyringError|FAIL: keyring)" /tmp/keyring-out.txt \
+                  || { echo "expected NoKeyringError or FAIL marker, got something else"; exit 1; }
+              fi
+              # Q#6 push/pull e2e (only when secrets are present).
+              if [ -n "${CLOUDSMITH_API_KEY:-}" ] && [ -n "${CLOUDSMITH_NAMESPACE:-}" ]; then
+                PKG_NAME="fixture-${TARGET}.txt"
+                PKG_VER="${GITHUB_RUN_ID}"
+                mkdir -p e2e && cd e2e
+                printf "binary-poc fixture\ntarget=%s\nrun=%s\ndate=%s\n" \
+                  "${TARGET}" "${GITHUB_RUN_ID}" "$(date -u +%FT%TZ)" > "${PKG_NAME}"
+                CLOUDSMITH_NO_KEYRING=1 "$BIN" push raw "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+                  --name "${PKG_NAME}" --version "${PKG_VER}"
+                CLOUDSMITH_NO_KEYRING=1 "$BIN" download "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+                  --version "${PKG_VER}" --outfile "downloaded-${PKG_NAME}" --yes
+                cmp "${PKG_NAME}" "downloaded-${PKG_NAME}"
+                echo "Push/pull e2e PASS for ${TARGET}"
+                cd ..
+              else
+                echo "Skipping push/pull e2e: CLOUDSMITH_API_KEY or CLOUDSMITH_NAMESPACE unset."
+              fi
               mkdir -p /tmp/no-py
               env -i PATH=/tmp/no-py HOME=/tmp "$BIN" --version
               env -i PATH=/tmp/no-py HOME=/tmp "$BIN" --help > /dev/null

@@ -59,6 +59,11 @@ hiddenimports += [
     # Pydantic v2 native core sometimes needs explicit nudge.
     "pydantic",
     "pydantic_core",
+    # cryptography is transitive (keyring → secretstorage on Linux); listed
+    # explicitly so `check cryptography-selftest` works on every target.
+    "cryptography",
+    "cryptography.fernet",
+    "cryptography.hazmat.bindings._rust",
     # MCP transport modules are imported lazily by name.
     "mcp.server.stdio",
     "mcp.server.fastmcp",
