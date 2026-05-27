@@ -220,7 +220,7 @@ jobs:
             ./${BIN_NAME} mcp --help > /dev/null
           "
       - name: MCP stdio handshake on Alpine
-        timeout-minutes: 2
+        timeout-minutes: 3
         shell: bash
         run: |
           BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
@@ -230,7 +230,10 @@ jobs:
             -e INIT="$INIT" \
             -v "$PWD/bin:/work" -w /work alpine:latest sh -c '
               set -e
-              OUT=$(printf "%s\n" "$INIT" | timeout 15 ./${BIN_NAME} mcp start 2>/tmp/mcp.stderr | head -1)
+              # Warm the scie cache so PBS extraction does not count against
+              # the mcp timeout (first invocation can take 10-15s).
+              time ./${BIN_NAME} --version
+              OUT=$(printf "%s\n" "$INIT" | timeout 45 ./${BIN_NAME} mcp start 2>/tmp/mcp.stderr | head -1)
               echo "stdout: $OUT"
               echo "stderr (first 20 lines):"; head -20 /tmp/mcp.stderr || true
               echo "$OUT" | grep -q "\"jsonrpc\":\"2.0\"" || { echo "MCP handshake failed on musl x86_64"; exit 1; }
@@ -396,14 +399,17 @@ jobs:
           name: cloudsmith-linux-x86_64
           path: ./bin
       - name: Send MCP initialize request
-        timeout-minutes: 2
+        timeout-minutes: 3
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
           BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
           echo "Binary under test: ${BIN_NAME}"
+          # Warm the scie cache so PBS extraction doesn't count against the
+          # mcp timeout — first invocation can take 10-15s on a cold runner.
+          time ./bin/"${BIN_NAME}" --version
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0"}}}'
-          OUT=$(printf '%s\n' "$INIT" | timeout 15 ./bin/"${BIN_NAME}" mcp start 2>/tmp/mcp.stderr || true)
+          OUT=$(printf '%s\n' "$INIT" | timeout 45 ./bin/"${BIN_NAME}" mcp start 2>/tmp/mcp.stderr || true)
           echo "stdout (first 5 lines):"
           echo "$OUT" | head -5
           echo "stderr (first 20 lines):"
