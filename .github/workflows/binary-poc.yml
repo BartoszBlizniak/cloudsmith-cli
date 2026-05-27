@@ -156,14 +156,15 @@ jobs:
           # soon. Will be promoted to setup.py install_requires when that
           # lands.
           #
-          # `--only-binary :all:` forces wheel-only install. On
-          # windows-arm64 no pre-built cp312-win_arm64 wheel exists for
-          # cryptography 48.x (source build needs OpenSSL+Rust, neither
-          # available on the runner), so the install fails soft and the
-          # cryptography-selftest is gated below to skip that target.
-          if ! python -m pip install --only-binary :all: cryptography; then
-            echo "WARN: cryptography wheel unavailable on ${{ matrix.target }} — selftest will report it."
-          fi
+          # `--only-binary :all:` forces wheel-only resolution. Upstream
+          # wheel coverage for `win_arm64` is patchy (pyca/cryptography#9244):
+          # 48.x and 47.x ship no `cp*-win_arm64` wheels, 46.x does, so
+          # pip naturally backtracks to `cryptography-46.0.3-cp311-abi3-win_arm64`
+          # on `windows-11-arm`. If even that disappears upstream the install
+          # is allowed to fail soft and the cryptography-selftest gate below
+          # records the gap rather than blocking the matrix.
+          python -m pip install --only-binary :all: cryptography \
+            || echo "WARN: no cryptography wheel for ${{ matrix.target }} — selftest will report it."
           python -m pip install "pyinstaller==${PYINSTALLER_VERSION}"
 
       - name: Build binary
@@ -240,13 +241,15 @@ jobs:
           & $bin mcp --help | Out-Null
           $env:CLOUDSMITH_NO_KEYRING = "1"
           & $bin check service
-          # cryptography is wheel-only on Windows; cp312-win_arm64 wheels
-          # don't exist for 48.x yet, so the selftest is enforced on
-          # win-amd64 but accepted as a known gap on win-arm64.
+          # cryptography is wheel-only on Windows; pip naturally resolves
+          # to the latest version with a `win_arm64` wheel (46.x today
+          # — pyca/cryptography#9244 tracks the gap on 47.x/48.x). The
+          # selftest is enforced on win-amd64 and is informational on
+          # win-arm64 in case the install soft-fails (no wheel at all).
           & $bin check cryptography-selftest
           $cryptoExit = $LASTEXITCODE
           if ("${{ matrix.target }}" -eq "windows-arm64") {
-            Write-Host "INFO: cryptography-selftest exit=$cryptoExit on windows-arm64 (gap expected — no pre-built wheel)."
+            Write-Host "cryptography-selftest exit=$cryptoExit on windows-arm64 (informational — pyca/cryptography#9244)."
           } elseif ($cryptoExit -ne 0) {
             throw "cryptography-selftest failed: $cryptoExit"
           }

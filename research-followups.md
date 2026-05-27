@@ -15,9 +15,9 @@ PoC branches on `BartoszBlizniak/cloudsmith-cli`:
 | #2 | PBS glibc floor | **ANSWERED — glibc 2.34** | Run `26503644284`. PASS: amazonlinux:2023 (2.34), debian:12 (2.36), rockylinux:9 (2.34), ubuntu:22.04 (2.35). FAIL: amazonlinux:2 (2.26), debian:11 (2.31), rockylinux:8 (2.28), ubuntu:20.04 (2.31). Fail mode: PBS scie boots its bundled CPython 3.12.13 but the in-PEX resolver reports `cryptography>=2.0` unavailable for the runtime tag set (`cp312-cp312-manylinux_2_31_x86_64`), then exits with `Boot binding command failed`. |
 | #3 | PEX scie + Alpine + pydantic-core (x86_64) | **ANSWERED — PASS** | `smoke linux musl x86_64 no-Python` job, run `26223343596` (SHA `f4147b5`). `cloudsmith --version`, `--help`, `mcp --help` all OK on `alpine:latest`. Binary 100.7 MiB. |
 | #4 | PEX scie + Alpine + arm64 | **ANSWERED — PASS** | `smoke linux musl aarch64 no-Python` job, same run, on `ubuntu-24.04-arm` + `alpine:latest --platform linux/arm64`. Binary 100.6 MiB. |
-| #5 | Keyring round-trip per backend | **IN FLIGHT (PyInstaller)** | `binary-poc` SHA `9b00c7f`, run `26505942827`. Hidden `check keyring-selftest` subcommand added (synthetic set/get/delete via the configured backend). CI gates: macOS/Windows native, Linux glibc via `dbus-run-session` + `gnome-keyring-daemon`, musl Alpine expected to fail gracefully + verify `CLOUDSMITH_NO_KEYRING=1` fallback. Signed-macOS retest blocked on Q#16. |
-| #6 | Authenticated push/pull e2e | **IN FLIGHT (PyInstaller)** | Same run. New `setup-test-repo` job idempotently creates `$CLOUDSMITH_NAMESPACE/binary-poc` (raw, public); per-target steps push a `$GITHUB_RUN_ID`-versioned fixture, download, `cmp`. setup-test-repo step succeeded in the in-flight run (raw repo provisioned). |
-| #7 | Native cryptography round-trip | **IN FLIGHT (PyInstaller)** | Same run. Hidden `check cryptography-selftest` subcommand added (Fernet `generate_key` → encrypt → decrypt round-trip). No direct `from cryptography` import sites exist in the CLI today (`grep -rn "from cryptography" cloudsmith_cli/` returns nothing); the module is pulled transitively via `keyring → secretstorage` on Linux. PRs #275 (credential chain) + #276 (OIDC) in flight may introduce real call sites. Spec lists `cryptography`, `cryptography.fernet`, `cryptography.hazmat.bindings._rust` under hidden imports explicitly. |
+| #5 | Keyring round-trip per backend | **ANSWERED — PASS (PyInstaller)** | `binary-poc` SHA `b2870c7`, run `26506647354` (all 8 jobs green). Synthetic `check keyring-selftest` (set/get/delete) returns 0 on SecretService.Keyring (linux glibc, dbus-run-session + gnome-keyring-daemon), macOS.Keyring (mac arm64/amd64), Windows.WinVaultKeyring (win amd64/arm64). Linux musl Alpine: backend resolves to `fail.Keyring`, selftest exits non-zero with `NoKeyringError`, `CLOUDSMITH_NO_KEYRING=1` fallback verified green in the same step. Signed-macOS retest blocked on Q#16 (Apple Developer ID). |
+| #6 | Authenticated push/pull e2e | **ANSWERED — PASS (PyInstaller)** | Same run. `setup-test-repo` job created `$CLOUDSMITH_NAMESPACE/binary-poc` (raw, public) once; per-target legs pushed a `$GITHUB_RUN_ID × target`-versioned fixture, downloaded it, and `cmp`'d against the source — green on all 8 targets including Linux musl arm64 (docker-run) and both Windows architectures (absolute-path cwd fix in `b2870c7`). |
+| #7 | Native cryptography round-trip | **ANSWERED — PASS (PyInstaller)** | Same run. Hidden `check cryptography-selftest` does `Fernet.generate_key() → encrypt → decrypt` and verifies round-trip. Audit returned zero direct `from cryptography` / `import cryptography` call sites in the CLI today — module is transitive via `keyring → secretstorage` on Linux. CI installs cryptography explicitly with `--only-binary :all:`; pip backtracks to `cryptography-46.0.3-cp311-abi3-win_arm64` on `windows-11-arm` (48.x + 47.x ship no `win_arm64` wheels — pyca/cryptography#9244). Selftest exit 0 on all 8 targets. |
 | #8 | anyio + MCP stdio on Windows under PEX scie | **N/A (Q#1)** + extended to macOS/musl | Windows scie path eliminated by Q#1. MCP handshake now exercised on linux-x86_64 (already green), musl-x86_64, macOS-aarch64 in commit `bdd3ecb`. |
 | #12 | Reproducible PEX scie | **ANSWERED — YES** | Run `26503644284`, job `reproducibility (linux-x86_64)` PASS — two PEX scie builds with `SOURCE_DATE_EPOCH=1700000000` and isolated `PEX_ROOT` produced byte-identical binaries on the same runner. Cross-runner/OS verification still open (only one cell tested). |
 | #13 | `cloudsmith-cli-action` libc detection | **DESIGN BRIEF DRAFTED** | Algorithm, URL shape, fallback policy, unit + integration test matrices, and implementation notes are in §13 below. PR to `cloudsmith-io/cloudsmith-cli-action` deferred to an engineer with push perms there (binary PoC work is scoped to this fork). |
@@ -181,7 +181,7 @@ Failure mode: PBS bundled CPython 3.12.13 boots, but the in-PEX resolver reports
 
 ## 5. Keyring round-trip on each native backend
 
-**Status (2026-05-27):** IN FLIGHT for PyInstaller. `binary-poc` SHA `9b00c7f`, run `26505942827`.
+**Status (2026-05-27):** ANSWERED — PASS for PyInstaller. `binary-poc` SHA `b2870c7`, run `26506647354` (all 8 targets green).
 
 The original plan (`cloudsmith login --api-key … → cloudsmith whoami → cloudsmith logout`) turned out **not** to exercise the keyring — `cloudsmith login` writes the API key to `credentials.ini`, not the keyring. The CLI's only keyring use today is for SSO access/refresh tokens stored by the browser-flow webserver (`cloudsmith_cli/cli/webserver.py:store_sso_tokens`), which is not scriptable in CI.
 
@@ -196,6 +196,19 @@ CI gates this per OS in `.github/workflows/binary-poc.yml`:
 **Open subcases (not blocking the verdict):**
 - Signed macOS — blocked on Q#16. Apple Developer ID + notarisation needed to test whether codesign identity changes Keychain ACLs in a way that breaks SSO retrieval after re-signing.
 - Linux glibc without a daemon (server / headless) — the falsy default path. Verified separately in the smoke job: `CLOUDSMITH_NO_KEYRING=1` keeps `check service` working with no daemon present.
+
+**Results (run `26506647354`, all 8 targets green):**
+
+| target              | result | backend | evidence |
+|---------------------|--------|---------|----------|
+| linux-amd64-glibc   | ✅ PASS  | `keyring.backends.SecretService.Keyring` | `OK: keyring round-trip succeeded` after `dbus-run-session` + `gnome-keyring-daemon --unlock --components=secrets` |
+| linux-arm64-glibc   | ✅ PASS  | `keyring.backends.SecretService.Keyring` | same shape on `ubuntu-24.04-arm` |
+| linux-amd64-musl    | ⚠️ graceful fail | `keyring.backends.fail.Keyring` | `FAIL: keyring.set_password raised NoKeyringError: No recommended backend was available. … install the keyrings.alt package`. `CLOUDSMITH_NO_KEYRING=1 cloudsmith check service` then succeeded as documented fallback. |
+| linux-arm64-musl    | ⚠️ graceful fail | `keyring.backends.fail.Keyring` | same shape in docker-run on ubuntu-24.04-arm host |
+| macos-arm64         | ✅ PASS  | `keyring.backends.macOS.Keyring` | unsigned binary against runner's unlocked login keychain |
+| macos-amd64         | ✅ PASS  | `keyring.backends.macOS.Keyring` | macos-15-intel runner |
+| windows-amd64       | ✅ PASS  | `keyring.backends.Windows.WinVaultKeyring` | Credential Manager |
+| windows-arm64       | ✅ PASS  | `keyring.backends.Windows.WinVaultKeyring` | Credential Manager on `windows-11-arm` |
 
 **Question:** Does `cloudsmith login --api-key <key>` followed by `cloudsmith whoami` (no `CLOUDSMITH_NO_KEYRING`) work end-to-end inside both a PyInstaller-frozen and a PEX-scie binary on each OS's native backend?
 
@@ -220,7 +233,7 @@ CI gates this per OS in `.github/workflows/binary-poc.yml`:
 
 ## 6. Authenticated push / pull e2e
 
-**Status (2026-05-27):** IN FLIGHT for PyInstaller. `binary-poc` SHA `9b00c7f`, run `26505942827`. New `setup-test-repo` job idempotently creates `$CLOUDSMITH_NAMESPACE/binary-poc` (raw type, public) using the CLI installed from source; it succeeded in the in-flight run (the raw repo is now provisioned).
+**Status (2026-05-27):** ANSWERED — PASS for PyInstaller. `binary-poc` SHA `b2870c7`, run `26506647354` (all 8 targets green). New `setup-test-repo` job idempotently creates `$CLOUDSMITH_NAMESPACE/binary-poc` (raw type, public) using the CLI installed from source; that step now succeeds across pushes (idempotent existence check).
 
 Each matrix target then runs (gated on `vars.CLOUDSMITH_NAMESPACE != ''` so external forks without secrets do not break):
 
@@ -238,18 +251,18 @@ cmp "$PKG_NAME" "downloaded-$PKG_NAME"
 
 Versioning by `$GITHUB_RUN_ID` × `$TARGET` keeps each run's fixtures distinct from prior runs and from sibling matrix legs, so no cleanup logic is required (and republish flags can stay default). Windows uses a PowerShell-equivalent with `Get-FileHash` instead of `cmp`. Linux-arm64-musl runs inline inside the docker block, since the whole job is split out from the matrix (Alpine container limitation on ARM64 runners).
 
-Results table to be filled when the run finishes:
+Results from run `26506647354` (all 8 targets green):
 
-| target              | push     | download | cmp      | notes |
-|---------------------|----------|----------|----------|-------|
-| linux-amd64-glibc   | pending  | pending  | pending  |       |
-| linux-arm64-glibc   | pending  | pending  | pending  |       |
-| linux-amd64-musl    | pending  | pending  | pending  |       |
-| linux-arm64-musl    | pending  | pending  | pending  |       |
-| macos-arm64         | pending  | pending  | pending  |       |
-| macos-amd64         | pending  | pending  | pending  |       |
-| windows-amd64       | pending  | pending  | pending  |       |
-| windows-arm64       | pending  | pending  | pending  |       |
+| target              | push | download | cmp  | notes |
+|---------------------|------|----------|------|-------|
+| linux-amd64-glibc   | ✅   | ✅       | ✅   | |
+| linux-arm64-glibc   | ✅   | ✅       | ✅   | |
+| linux-amd64-musl    | ✅   | ✅       | ✅   | in-container `python:3.12-alpine` |
+| linux-arm64-musl    | ✅   | ✅       | ✅   | docker-run on ubuntu-24.04-arm |
+| macos-arm64         | ✅   | ✅       | ✅   | |
+| macos-amd64         | ✅   | ✅       | ✅   | macos-15-intel ~6 min |
+| windows-amd64       | ✅   | ✅       | ✅   | absolute-path fix vs cwd-after-Set-Location |
+| windows-arm64       | ✅   | ✅       | ✅   | same absolute-path fix on windows-11-arm |
 
 **Question:** Do `cloudsmith push raw <repo> file.txt` and `cloudsmith download raw <repo>/file.txt` succeed from frozen binaries on every target?
 
@@ -276,7 +289,7 @@ Results table to be filled when the run finishes:
 
 ## 7. Native `cryptography` round-trip
 
-**Status (2026-05-27):** IN FLIGHT for PyInstaller. `binary-poc` SHA `9b00c7f`, run `26505942827`.
+**Status (2026-05-27):** ANSWERED — PASS for PyInstaller on all 8 targets. `binary-poc` SHA `b2870c7`, run `26506647354`.
 
 **Audit result:** zero direct `cryptography` use in the CLI today. `grep -rn "from cryptography\\|import cryptography" cloudsmith_cli/` returns nothing. The dependency is purely transitive via `keyring → secretstorage → cryptography` on Linux, plus whatever `mcp`'s deps bring in. PRs #275 (credential chain) and #276 (OIDC) in flight may introduce real call sites — at which point the synthetic selftest can be replaced with a real subcommand exercise.
 
@@ -285,6 +298,21 @@ Results table to be filled when the run finishes:
 **CI wiring:** added to the existing smoke steps (POSIX onefile, POSIX onedir, Windows onefile, Windows onedir, and the linux-arm64-musl docker block). Runs on all 8 targets, not just the four named in the original plan — marginal cost is one extra Click invocation per target.
 
 Local sanity check on macOS arm64 dev box: `cloudsmith check cryptography-selftest` → `OK: cryptography Fernet round-trip succeeded` (exit 0).
+
+**Windows ARM64 wheel resolution (run `26506647354`):** `cryptography==48.0.0` ships no `cp*-win_arm64` wheels (verified at <https://pypi.org/pypi/cryptography/48.0.0/json>); 47.x is the same. Pip with `--only-binary :all:` backtracks the version solver until it finds a wheel — `cryptography-46.0.3-cp311-abi3-win_arm64.whl` works on Python 3.12 (abi3 forward-compat). All 8 targets therefore install `cryptography` from a wheel, no source build needed. The CI install line emits a soft-fail safety net in case the 46.x wheel ever disappears upstream ([pyca/cryptography#9244](https://github.com/pyca/cryptography/issues/9244) tracks the gap on 47.x/48.x); the smoke step's `cryptography-selftest` exit code is informational on win-arm64 and enforced everywhere else.
+
+Results table (run `26506647354`):
+
+| target              | cryptography | keyring backend                                  | notes |
+|---------------------|--------------|--------------------------------------------------|-------|
+| linux-amd64-glibc   | ✅ 48.0.0     | `keyring.backends.SecretService.Keyring`         | gnome-keyring-daemon shim |
+| linux-arm64-glibc   | ✅ 48.0.0     | `keyring.backends.SecretService.Keyring`         | gnome-keyring-daemon shim |
+| linux-amd64-musl    | ✅ 48.0.0     | `keyring.backends.fail.Keyring` (graceful)       | `NoKeyringError`; `NO_KEYRING=1` fallback green |
+| linux-arm64-musl    | ✅ 48.0.0     | `keyring.backends.fail.Keyring` (graceful)       | docker-run on ubuntu-24.04-arm |
+| macos-arm64         | ✅ 48.0.0     | `keyring.backends.macOS.Keyring`                 | unsigned binary, login keychain |
+| macos-amd64         | ✅ 48.0.0     | `keyring.backends.macOS.Keyring`                 | macos-15-intel |
+| windows-amd64       | ✅ 48.0.0     | `keyring.backends.Windows.WinVaultKeyring`       | Credential Manager |
+| windows-arm64       | ✅ 46.0.3     | `keyring.backends.Windows.WinVaultKeyring`       | abi3 wheel via pip backtrack; selftest exit=0 |
 
 **Question:** Does an actual private-key operation (sign, decrypt) work inside a frozen Cloudsmith CLI binary?
 
