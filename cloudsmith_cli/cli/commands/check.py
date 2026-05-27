@@ -1,5 +1,7 @@
 """CLI/Commands - Get an API token."""
 
+import sys
+
 import click
 import cloudsmith_api
 import semver
@@ -75,8 +77,7 @@ def rates(ctx, opts):
 
 
 @check.command(hidden=True, name="keyring-selftest")
-@click.pass_context
-def keyring_selftest(ctx):
+def keyring_selftest():
     """Frozen-binary selftest: prove keyring backend resolves and round-trips.
 
     Hidden — used by CI smoke tests on PyInstaller/PEX scie binaries. The
@@ -97,7 +98,7 @@ def keyring_selftest(ctx):
             fg="red",
             err=True,
         )
-        ctx.exit(2)
+        sys.exit(2)
 
     backend_name = type(backend).__module__ + "." + type(backend).__name__
     click.echo(f"backend: {backend_name}")
@@ -114,7 +115,7 @@ def keyring_selftest(ctx):
             fg="red",
             err=True,
         )
-        ctx.exit(3)
+        sys.exit(3)
 
     try:
         got = _keyring.get_password(service, username)
@@ -124,7 +125,7 @@ def keyring_selftest(ctx):
             fg="red",
             err=True,
         )
-        ctx.exit(4)
+        sys.exit(4)
 
     if got != sentinel:
         click.secho(
@@ -137,7 +138,7 @@ def keyring_selftest(ctx):
             _keyring.delete_password(service, username)
         except Exception:  # pylint: disable=broad-except
             pass
-        ctx.exit(5)
+        sys.exit(5)
 
     try:
         _keyring.delete_password(service, username)
@@ -147,7 +148,7 @@ def keyring_selftest(ctx):
             fg="red",
             err=True,
         )
-        ctx.exit(6)
+        sys.exit(6)
 
     try:
         after = _keyring.get_password(service, username)
@@ -159,14 +160,13 @@ def keyring_selftest(ctx):
             fg="red",
             err=True,
         )
-        ctx.exit(7)
+        sys.exit(7)
 
     click.secho(f"OK: keyring round-trip succeeded via {backend_name}", fg="green")
 
 
 @check.command(hidden=True, name="cryptography-selftest")
-@click.pass_context
-def cryptography_selftest(ctx):
+def cryptography_selftest():
     """Frozen-binary selftest: prove cryptography native module loads and round-trips.
 
     Hidden — used by CI smoke tests on PyInstaller/PEX scie binaries to confirm
@@ -179,7 +179,7 @@ def cryptography_selftest(ctx):
         from cryptography.fernet import Fernet
     except ImportError as exc:
         click.secho(f"FAIL: cryptography import error: {exc}", fg="red", err=True)
-        ctx.exit(2)
+        sys.exit(2)
 
     sentinel = b"cloudsmith-cli cryptography selftest"
     try:
@@ -192,7 +192,7 @@ def cryptography_selftest(ctx):
             fg="red",
             err=True,
         )
-        ctx.exit(3)
+        sys.exit(3)
 
     if decrypted != sentinel:
         click.secho(
@@ -200,7 +200,7 @@ def cryptography_selftest(ctx):
             fg="red",
             err=True,
         )
-        ctx.exit(4)
+        sys.exit(4)
 
     click.secho("OK: cryptography Fernet round-trip succeeded", fg="green")
 

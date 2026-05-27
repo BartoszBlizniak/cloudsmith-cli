@@ -147,6 +147,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install -e .
+          # `cryptography` is a transitive dep on Linux/macOS (keyring →
+          # secretstorage) but NOT on Windows (WinVaultKeyring uses the
+          # native Windows API). Install explicitly so the frozen binary
+          # bundles it on every target — the hidden `check
+          # cryptography-selftest` subcommand needs the module present
+          # everywhere, and OIDC (PR #276) will introduce a real call site
+          # soon. Will be promoted to setup.py install_requires when that
+          # lands.
+          python -m pip install cryptography
           python -m pip install "pyinstaller==${PYINSTALLER_VERSION}"
 
       - name: Build binary
@@ -381,7 +390,9 @@ jobs:
           CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
           CLOUDSMITH_NO_KEYRING: "1"
         run: |
-          $bin = ".\out\cloudsmith-${{ matrix.target }}.exe"
+          # Use an absolute path for $bin so `Set-Location e2e` below does
+          # not leave us looking for cloudsmith.exe in the wrong directory.
+          $bin = Join-Path $PWD "out\cloudsmith-${{ matrix.target }}.exe"
           $pkgName = "fixture-${{ matrix.target }}.txt"
           $pkgVer = "$env:GITHUB_RUN_ID"
           New-Item -ItemType Directory -Force e2e | Out-Null
