@@ -219,6 +219,22 @@ jobs:
             ./${BIN_NAME} --help > /dev/null
             ./${BIN_NAME} mcp --help > /dev/null
           "
+      - name: MCP stdio handshake on Alpine
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0"}}}'
+          docker run --rm \
+            -e BIN_NAME="$BIN_NAME" \
+            -e INIT="$INIT" \
+            -v "$PWD/bin:/work" -w /work alpine:latest sh -c '
+              set -e
+              OUT=$(printf "%s\n" "$INIT" | timeout 15 ./${BIN_NAME} mcp start 2>/tmp/mcp.stderr | head -1)
+              echo "stdout: $OUT"
+              echo "stderr (first 20 lines):"; head -20 /tmp/mcp.stderr || true
+              echo "$OUT" | grep -q "\"jsonrpc\":\"2.0\"" || { echo "MCP handshake failed on musl x86_64"; exit 1; }
+            '
 
   smoke-linux-musl-aarch64:
     name: smoke linux musl aarch64 no-Python
@@ -264,6 +280,22 @@ jobs:
           ./bin/"${BIN_NAME}" --version
           ./bin/"${BIN_NAME}" --help > /dev/null
           ./bin/"${BIN_NAME}" mcp --help > /dev/null
+      - name: MCP stdio handshake on macOS aarch64
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
+          mkdir -p /tmp/no-python
+          export PATH=/tmp/no-python
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0"}}}'
+          # head -1 reads first line then closes pipe → SIGPIPE terminates
+          # the mcp server. GH step timeout above is a hard ceiling.
+          set +o pipefail
+          OUT=$(printf '%s\n' "$INIT" | ./bin/"${BIN_NAME}" mcp start 2>/tmp/mcp.stderr | head -1)
+          set -o pipefail
+          echo "stdout: $OUT"
+          echo "stderr (first 20 lines):"; head -20 /tmp/mcp.stderr || true
+          echo "$OUT" | grep -q '"jsonrpc":"2.0"' || { echo 'MCP handshake failed on macOS aarch64'; exit 1; }
 
   # macos-x86_64 is its own pipeline (build + smoke) because macos-13
   # GitHub-hosted Intel runners have low capacity. Decoupling stops a
@@ -365,6 +397,7 @@ jobs:
           name: cloudsmith-linux-x86_64
           path: ./bin
       - name: Send MCP initialize request
+        timeout-minutes: 2
         shell: bash
         run: |
           chmod +x ./bin/cloudsmith-*
@@ -377,6 +410,137 @@ jobs:
           echo "stderr (first 20 lines):"
           head -20 /tmp/mcp.stderr || true
           echo "$OUT" | head -1 | grep -q '"jsonrpc":"2.0"' || { echo 'No jsonrpc envelope in first line'; exit 1; }
+
+  # Q#2: Run the linux-x86_64 PEX-scie binary across multiple glibc/musl
+  # distros to establish the PBS glibc floor. PBS release 20260510 ships
+  # CPython 3.14.5 statically linked against the glibc on the build host
+  # (manylinux2014 == glibc 2.17). The binary is single-arch (x86_64).
+  glibc-floor:
+    name: glibc floor (${{ matrix.distro }})
+    needs: smoke-linux-glibc-x86_64
+    if: ${{ !cancelled() && needs.smoke-linux-glibc-x86_64.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - rockylinux:8
+          - rockylinux:9
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - amazonlinux:2
+          - amazonlinux:2023
+          - debian:11
+          - debian:12
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cloudsmith-linux-x86_64
+          path: ./bin
+      - name: Run binary in ${{ matrix.distro }}
+        shell: bash
+        run: |
+          chmod +x ./bin/cloudsmith-*
+          BIN_NAME=$(ls -S ./bin/cloudsmith-* | grep -v '\.sha256$' | head -1 | xargs basename)
+          echo "Binary under test: ${BIN_NAME}"
+          echo "Distro: ${{ matrix.distro }}"
+          docker run --rm \
+            -e BIN_NAME="$BIN_NAME" \
+            -v "$PWD/bin:/work" -w /work "${{ matrix.distro }}" sh -c '
+              set -e
+              # Record glibc version if available
+              (ldd --version 2>&1 || true) | head -1
+              if [ -f /etc/os-release ]; then grep -E "^(NAME|VERSION_ID)=" /etc/os-release; fi
+              ./${BIN_NAME} --version
+              ./${BIN_NAME} mcp --help > /dev/null
+            '
+
+  # Q#12: Build linux-x86_64 PEX-scie twice on the same runner with
+  # SOURCE_DATE_EPOCH pinned and compare sha256. If different, surface
+  # diffoscope output as a job artifact.
+  reproducibility:
+    name: reproducibility (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ inputs.python_version || '3.12' }}
+      - name: Install PEX
+        shell: bash
+        env:
+          PEX_VERSION: ${{ inputs.pex_version || '2.95.2' }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pex==${PEX_VERSION}" setuptools wheel
+      - name: Build twice with SOURCE_DATE_EPOCH
+        id: build2x
+        shell: bash
+        env:
+          PBS_RELEASE: ${{ inputs.pbs_release || '20260510' }}
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for run in 1 2; do
+            workdir="run-${run}"
+            rm -rf "$workdir"
+            mkdir -p "$workdir"
+            SOURCE_DATE_EPOCH=1700000000 PEX_ROOT="${PWD}/${workdir}/.pex_cache" \
+              pex . \
+                --output-file "${workdir}/cloudsmith.bin" \
+                --console-script cloudsmith \
+                --scie eager \
+                --scie-only \
+                --scie-name-style platform-file-suffix \
+                --scie-pbs-release "${PBS_RELEASE}" \
+                --scie-platform linux-x86_64 \
+                --complete-platform .github/.platforms/linux-x86_64-py312.json \
+                --venv
+            # PEX appends platform suffix; pick the largest file
+            SCIE=$(ls -S "${workdir}/cloudsmith.bin"* | head -1)
+            mv "${SCIE}" "${workdir}/scie.bin"
+          done
+          SHA1=$(sha256sum run-1/scie.bin | awk '{print $1}')
+          SHA2=$(sha256sum run-2/scie.bin | awk '{print $1}')
+          {
+            echo "sha1=${SHA1}"
+            echo "sha2=${SHA2}"
+            if [ "${SHA1}" = "${SHA2}" ]; then echo "match=true"; else echo "match=false"; fi
+          } >> "$GITHUB_OUTPUT"
+          echo "## Reproducibility (linux-x86_64)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| run | sha256 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 1 | \`${SHA1}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 2 | \`${SHA2}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${SHA1}" = "${SHA2}" ]; then
+            echo "**Result:** byte-identical." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Result:** divergent — diffoscope artifact uploaded." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Diffoscope on divergence
+        if: steps.build2x.outputs.match == 'false'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends diffoscope
+          diffoscope --max-report-size=4194304 --text repro-diff.txt run-1/scie.bin run-2/scie.bin || true
+          head -200 repro-diff.txt || true
+      - name: Upload diff
+        if: steps.build2x.outputs.match == 'false'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reproducibility-diff
+          path: |
+            repro-diff.txt
+            run-1/scie.bin
+            run-2/scie.bin
+          retention-days: 14
+          if-no-files-found: warn
 
   summary:
     name: PoC summary
@@ -391,6 +555,8 @@ jobs:
       - smoke-macos-aarch64
       - smoke-macos-x86_64
       - mcp-stdio
+      - glibc-floor
+      - reproducibility
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate
@@ -405,12 +571,16 @@ jobs:
           R_MACOS_ARM: ${{ needs.smoke-macos-aarch64.result }}
           R_MACOS_X86: ${{ needs.smoke-macos-x86_64.result }}
           R_MCP: ${{ needs.mcp-stdio.result }}
+          R_GLIBC: ${{ needs.glibc-floor.result }}
+          R_REPRO: ${{ needs.reproducibility.result }}
         run: |
           {
             echo "## PoC PEX-scie matrix"
             echo ""
-            echo "Windows targets EXCLUDED: PEX 2.95.2 does not currently"
-            echo "support \`--scie-platform windows-*\`. See workflow header."
+            echo "Windows targets EXCLUDED: PEX 2.95.2 \`pex/scie/__init__.py\`"
+            echo "explicitly filters \`WINDOWS_X86_64\` and \`WINDOWS_AARCH64\`"
+            echo "from \`--scie-platform\` choices. Tracking issue:"
+            echo "https://github.com/pex-tool/pex/issues/2658"
             echo ""
             echo "| Job | Result |"
             echo "|-----|--------|"
@@ -418,9 +588,11 @@ jobs:
             echo "| build-macos-x86_64 | ${R_BUILD_MAC_X86} |"
             echo "| smoke-linux-glibc-x86_64 | ${R_LIN_GLIBC_X86} |"
             echo "| smoke-linux-glibc-aarch64 | ${R_LIN_GLIBC_ARM} |"
-            echo "| smoke-linux-musl-x86_64 | ${R_LIN_MUSL_X86} |"
+            echo "| smoke-linux-musl-x86_64 (incl. mcp stdio) | ${R_LIN_MUSL_X86} |"
             echo "| smoke-linux-musl-aarch64 | ${R_LIN_MUSL_ARM} |"
-            echo "| smoke-macos-aarch64 | ${R_MACOS_ARM} |"
+            echo "| smoke-macos-aarch64 (incl. mcp stdio) | ${R_MACOS_ARM} |"
             echo "| smoke-macos-x86_64 | ${R_MACOS_X86} |"
-            echo "| mcp-stdio | ${R_MCP} |"
+            echo "| mcp-stdio (linux-x86_64) | ${R_MCP} |"
+            echo "| glibc-floor (8 distros) | ${R_GLIBC} |"
+            echo "| reproducibility (linux-x86_64) | ${R_REPRO} |"
           } >> "$GITHUB_STEP_SUMMARY"
