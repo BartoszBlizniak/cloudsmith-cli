@@ -1,0 +1,526 @@
+name: Binary PoC (PEX scie + pex.rc)
+
+# Production-ready PEX-scie / pex.rc PoC matrix. Mirrors binary-poc.yml
+# (PyInstaller) so the two paths are directly comparable.
+#
+# POSIX targets:  native build with `pex --scie eager --scie-platform <triple>`.
+# Windows targets: cross-built from Linux. Tests TWO candidate paths:
+#   - SCIE: `pex --scie eager --scie-platform windows-x86_64` (bundles
+#     python-build-standalone; the historical question is whether PEX 2.95.2
+#     really supports this target — local `pex --help` did not list it.)
+#   - RC:   `pex --rc` per jsirois (#2658, 2026-05-26). Builds a PEX with
+#     native pex.rc runtime; the question we test here is whether the
+#     resulting binary genuinely runs with NO Python on PATH on Windows.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - binary-poc
+      - "binary-poc-pex/**"
+
+permissions:
+  contents: read
+
+env:
+  PEX_VERSION: "2.95.2"
+  # PEX needs >=3.10 for the wheel set; pin 3.10 to match the existing
+  # release.yml and the .github/.platforms/*-py310.json complete-platform
+  # files already in the repo.
+  PYTHON_VERSION: "3.10"
+  TEST_REPO_SLUG: binary-poc
+
+jobs:
+  # Same shape as binary-poc.yml: ensure the binary-poc raw repo exists so
+  # the e2e push/pull step has somewhere to land. Soft-skips on forks
+  # without the CLOUDSMITH_NAMESPACE var.
+  setup-test-repo:
+    name: Ensure $CLOUDSMITH_NAMESPACE/binary-poc raw repo exists
+    runs-on: ubuntu-latest
+    if: ${{ vars.CLOUDSMITH_NAMESPACE != '' }}
+    env:
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+      CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+      CLOUDSMITH_NO_KEYRING: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install CLI from source
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Create binary-poc repo if missing
+        env:
+          REPO: ${{ env.TEST_REPO_SLUG }}
+        run: |
+          set -eu
+          if cloudsmith list repos "${CLOUDSMITH_NAMESPACE}/${REPO}" -F json 2>/dev/null \
+              | grep -q "\"slug\": \"${REPO}\""; then
+            echo "Repo ${CLOUDSMITH_NAMESPACE}/${REPO} already exists, skipping create."
+            exit 0
+          fi
+          cat > /tmp/repo-config.json <<EOF
+          {
+            "name": "${REPO}",
+            "description": "Cloudsmith CLI binary PoC test repo (autocreated).",
+            "repository_type_str": "Public",
+            "slug": "${REPO}"
+          }
+          EOF
+          cloudsmith repos create "${CLOUDSMITH_NAMESPACE}" /tmp/repo-config.json
+
+  # ---------------------------------------------------------------------------
+  # POSIX builds: native `--scie eager` on each runner.
+  # ---------------------------------------------------------------------------
+  build-posix:
+    name: build-posix (${{ matrix.target }})
+    needs: [setup-test-repo]
+    if: ${{ always() && (needs.setup-test-repo.result == 'success' || needs.setup-test-repo.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64-glibc
+            runs-on: ubuntu-latest
+            scie-platform: linux-x86_64
+            shell: bash
+          - target: linux-arm64-glibc
+            runs-on: ubuntu-24.04-arm
+            scie-platform: linux-aarch64
+            shell: bash
+          - target: linux-amd64-musl
+            runs-on: ubuntu-latest
+            container: python:3.10-alpine
+            scie-platform: linux-x86_64-musl
+            shell: sh
+          - target: macos-arm64
+            runs-on: macos-latest
+            scie-platform: macos-aarch64
+            shell: bash
+          - target: macos-amd64
+            runs-on: macos-15-intel
+            scie-platform: macos-x86_64
+            shell: bash
+    runs-on: ${{ matrix.runs-on }}
+    container: ${{ matrix.container }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    env:
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+      CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+    steps:
+      - name: Install build deps (Alpine)
+        if: contains(matrix.target, 'musl')
+        run: |
+          apk add --no-cache git bash build-base musl-dev libffi-dev openssl-dev \
+            zlib-dev binutils ca-certificates curl coreutils
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python (host)
+        if: ${{ !contains(matrix.target, 'musl') }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Show Python version
+        run: |
+          python --version || python3 --version
+          python -m pip --version || python3 -m pip --version
+
+      - name: Install PEX + build deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+          python -m pip install --only-binary :all: cryptography \
+            || echo "WARN: no cryptography wheel on this host."
+          python -m pip install "pex==${PEX_VERSION}"
+
+      - name: Build scie binary
+        run: |
+          set -eux
+          mkdir -p out
+          OUT="out/cloudsmith-${{ matrix.target }}"
+          pex . \
+            --output-file "${OUT}" \
+            --console-script cloudsmith \
+            --scie eager \
+            --scie-platform "${{ matrix.scie-platform }}" \
+            --venv
+          chmod +x "${OUT}"
+          ls -lh "${OUT}"
+
+      - name: Smoke test
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          "${BIN}" --version
+          "${BIN}" --help > /dev/null
+          "${BIN}" list repos --help > /dev/null
+          "${BIN}" push raw --help > /dev/null
+          "${BIN}" mcp --help > /dev/null
+          CLOUDSMITH_NO_KEYRING=1 "${BIN}" check service
+          "${BIN}" check cryptography-selftest
+
+      - name: No-Python validation (Linux glibc)
+        if: startsWith(matrix.target, 'linux-') && !contains(matrix.target, 'musl')
+        run: |
+          docker run --rm -v "$(pwd)/out:/work" -w /work debian:stable-slim sh -c '
+            ! command -v python > /dev/null
+            ! command -v python3 > /dev/null
+            ./cloudsmith-${{ matrix.target }} --version
+            ./cloudsmith-${{ matrix.target }} --help > /dev/null
+            ./cloudsmith-${{ matrix.target }} mcp --help > /dev/null
+          '
+
+      - name: No-Python validation (Linux musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          mkdir -p /tmp/no-py
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --version
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --help > /dev/null
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" mcp --help > /dev/null
+
+      - name: No-Python validation (macOS)
+        if: startsWith(matrix.target, 'macos-')
+        run: |
+          mkdir -p /tmp/no-py
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --version
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" --help > /dev/null
+          env -i PATH=/tmp/no-py HOME=/tmp "./out/cloudsmith-${{ matrix.target }}" mcp --help > /dev/null
+
+      - name: MCP stdio init
+        run: |
+          set -eu
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"poc","version":"0.1"}}}' \
+            | timeout 15 "${BIN}" mcp start 2>&1 | head -5 || true
+
+      - name: Keyring round-trip (Linux glibc)
+        if: startsWith(matrix.target, 'linux-') && contains(matrix.target, 'glibc')
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          sudo apt-get update -y
+          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0
+          export CLOUDSMITH_BIN="${BIN}"
+          dbus-run-session -- bash -eux -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets &
+            sleep 1
+            "$CLOUDSMITH_BIN" check keyring-selftest
+          '
+
+      - name: Keyring graceful degradation (Linux musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          set +e
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          "${BIN}" check keyring-selftest > /tmp/keyring-out.txt 2>&1
+          rc=$?
+          echo "selftest exit=$rc; output:"
+          cat /tmp/keyring-out.txt
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            grep -qE "(NoKeyringError|FAIL: keyring)" /tmp/keyring-out.txt \
+              || { echo "expected NoKeyringError/FAIL, got something else"; exit 1; }
+          fi
+          CLOUDSMITH_NO_KEYRING=1 "${BIN}" check service
+
+      - name: Keyring round-trip (macOS)
+        if: startsWith(matrix.target, 'macos-')
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          security list-keychains -d user
+          "${BIN}" check keyring-selftest
+
+      - name: Push/pull e2e
+        if: vars.CLOUDSMITH_NAMESPACE != ''
+        env:
+          CLOUDSMITH_NO_KEYRING: "1"
+        run: |
+          set -eux
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          PKG_NAME="fixture-pex-${{ matrix.target }}.txt"
+          PKG_VER="${GITHUB_RUN_ID}"
+          mkdir -p e2e && cd e2e
+          printf 'pex binary-poc fixture\ntarget=%s\nrun=%s\ndate=%s\n' \
+            "${{ matrix.target }}" "${GITHUB_RUN_ID}" "$(date -u +%FT%TZ)" > "${PKG_NAME}"
+          "${BIN}" push raw "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+            --name "${PKG_NAME}" --version "${PKG_VER}"
+          "${BIN}" download "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+            --version "${PKG_VER}" --outfile "downloaded-${PKG_NAME}" --yes
+          cmp "${PKG_NAME}" "downloaded-${PKG_NAME}"
+          echo "PASS push/pull e2e ${{ matrix.target }}"
+
+      - name: Record size + startup
+        run: |
+          BIN="$(pwd)/out/cloudsmith-${{ matrix.target }}"
+          ls -lh "${BIN}"
+          # Wipe scie cache so the first timing is cold; the rest are warm.
+          rm -rf "${HOME}/.cache/nce" "${HOME}/.cache/pex" "${HOME}/.pex" 2>/dev/null || true
+          for i in 1 2 3; do
+            /usr/bin/time -p "${BIN}" --version 2>&1 | tail -3 || true
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloudsmith-${{ matrix.target }}-pex-scie
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # linux-arm64-musl: same docker-run pattern as binary-poc.yml (GHA JS Actions
+  # do not run inside Alpine on aarch64).
+  # ---------------------------------------------------------------------------
+  build-linux-arm64-musl:
+    name: build-posix (linux-arm64-musl)
+    runs-on: ubuntu-24.04-arm
+    needs: [setup-test-repo]
+    if: ${{ always() && (needs.setup-test-repo.result == 'success' || needs.setup-test-repo.result == 'skipped') }}
+    env:
+      TARGET: linux-arm64-musl
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+      CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build + smoke-test inside Alpine arm64 container
+        run: |
+          set -eux
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/work" -w /work \
+            -e PEX_VERSION \
+            -e TARGET \
+            -e CLOUDSMITH_API_KEY \
+            -e CLOUDSMITH_NAMESPACE \
+            -e TEST_REPO_SLUG \
+            -e GITHUB_RUN_ID \
+            python:3.10-alpine sh -eux -c '
+              apk add --no-cache git bash build-base musl-dev libffi-dev \
+                openssl-dev zlib-dev binutils ca-certificates curl coreutils
+              python -m pip install --upgrade pip
+              python -m pip install -r requirements.txt
+              python -m pip install -e .
+              python -m pip install --only-binary :all: cryptography \
+                || echo "WARN: no cryptography wheel."
+              python -m pip install "pex==${PEX_VERSION}"
+              mkdir -p out
+              OUT="out/cloudsmith-${TARGET}"
+              pex . \
+                --output-file "${OUT}" \
+                --console-script cloudsmith \
+                --scie eager \
+                --scie-platform linux-aarch64-musl \
+                --venv
+              chmod +x "${OUT}"
+              ls -lh "${OUT}"
+              "${OUT}" --version
+              "${OUT}" --help > /dev/null
+              "${OUT}" mcp --help > /dev/null
+              CLOUDSMITH_NO_KEYRING=1 "${OUT}" check service
+              "${OUT}" check cryptography-selftest
+              # no-Python: strip PATH
+              mkdir -p /tmp/no-py
+              env -i PATH=/tmp/no-py HOME=/tmp "${OUT}" --version
+              env -i PATH=/tmp/no-py HOME=/tmp "${OUT}" mcp --help > /dev/null
+              # keyring degradation (Alpine ships no Secret Service)
+              set +e
+              "${OUT}" check keyring-selftest > /tmp/keyring.txt 2>&1
+              rc=$?
+              echo "keyring exit=$rc"; cat /tmp/keyring.txt
+              set -e
+              # e2e (skipped on forks without secret)
+              if [ -n "${CLOUDSMITH_NAMESPACE}" ] && [ -n "${CLOUDSMITH_API_KEY}" ]; then
+                PKG_NAME="fixture-pex-${TARGET}.txt"
+                PKG_VER="${GITHUB_RUN_ID}"
+                mkdir -p e2e && cd e2e
+                printf "pex linux-arm64-musl fixture\n" > "${PKG_NAME}"
+                CLOUDSMITH_NO_KEYRING=1 "${OUT}" push raw \
+                  "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+                  --name "${PKG_NAME}" --version "${PKG_VER}"
+                CLOUDSMITH_NO_KEYRING=1 "${OUT}" download \
+                  "${CLOUDSMITH_NAMESPACE}/${TEST_REPO_SLUG}" "${PKG_NAME}" \
+                  --version "${PKG_VER}" --outfile "downloaded-${PKG_NAME}" --yes
+                cmp "${PKG_NAME}" "downloaded-${PKG_NAME}"
+              fi
+            '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloudsmith-linux-arm64-musl-pex-scie
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Windows cross-build (from Linux host).
+  # Tests BOTH candidate paths: `--scie eager` Windows scie target AND `--rc`.
+  # ---------------------------------------------------------------------------
+  build-windows-cross:
+    name: build-windows-cross (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    needs: [setup-test-repo]
+    if: ${{ always() && (needs.setup-test-repo.result == 'success' || needs.setup-test-repo.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: windows-amd64-scie
+            target: windows-amd64
+            complete-platform: .github/.platforms/windows-x86_64-py310.json
+            build-flags: "--scie eager --scie-platform windows-x86_64"
+          - variant: windows-amd64-rc
+            target: windows-amd64
+            complete-platform: .github/.platforms/windows-x86_64-py310.json
+            build-flags: "--rc"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install PEX + project deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+          python -m pip install "pex==${PEX_VERSION}"
+
+      - name: Show pex help for scie + rc flags
+        run: |
+          pex --version
+          pex --help 2>&1 | grep -E -- '--scie|--rc' || true
+          pex --help 2>&1 | grep -E -- 'scie-platform' -A 30 || true
+
+      - name: Cross-build PEX for Windows
+        run: |
+          set -eux
+          mkdir -p out
+          OUT="out/cloudsmith-${{ matrix.variant }}.exe"
+          # shellcheck disable=SC2086
+          pex . \
+            --output-file "${OUT}" \
+            --console-script cloudsmith \
+            ${{ matrix.build-flags }} \
+            --complete-platform ${{ matrix.complete-platform }} \
+            --venv
+          ls -lh "${OUT}"
+          file "${OUT}" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloudsmith-${{ matrix.variant }}-pex
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Windows native test: download cross-built artifact, validate on Windows.
+  # Critical question: does it actually run with NO Python on PATH?
+  # ---------------------------------------------------------------------------
+  test-windows:
+    name: test-windows (${{ matrix.variant }})
+    needs: [build-windows-cross]
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: windows-amd64-scie
+            runs-on: windows-2025-vs2026
+          - variant: windows-amd64-rc
+            runs-on: windows-2025-vs2026
+    env:
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+      CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v6.0.0
+        with:
+          name: cloudsmith-${{ matrix.variant }}-pex
+          path: ./bin
+
+      - name: Show artifact
+        shell: pwsh
+        run: |
+          Get-ChildItem .\bin
+
+      - name: Smoke test (Python available)
+        shell: pwsh
+        run: |
+          $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
+          & $bin --version
+          & $bin --help | Out-Null
+          & $bin list repos --help | Out-Null
+          & $bin mcp --help | Out-Null
+          $env:CLOUDSMITH_NO_KEYRING = "1"
+          & $bin check service
+          & $bin check cryptography-selftest
+          $cryptoExit = $LASTEXITCODE
+          if ($cryptoExit -ne 0) {
+            Write-Host "WARN: cryptography-selftest exit=$cryptoExit"
+          }
+
+      - name: No-Python validation (strip PATH)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force C:\no-py | Out-Null
+          $env:PATH = "C:\no-py"
+          $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
+          Write-Host "=== Variant ${{ matrix.variant }}: running with PATH=C:\no-py ==="
+          & $bin --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::${{ matrix.variant }} requires Python on PATH (exit $LASTEXITCODE)"
+            throw "no-Python validation FAILED for ${{ matrix.variant }}"
+          }
+          & $bin --help | Out-Null
+          & $bin mcp --help | Out-Null
+          Write-Host "PASS no-Python ${{ matrix.variant }}"
+
+      - name: Push/pull e2e (Windows)
+        if: vars.CLOUDSMITH_NAMESPACE != ''
+        shell: pwsh
+        env:
+          CLOUDSMITH_NO_KEYRING: "1"
+        run: |
+          $bin = Join-Path $PWD "bin\cloudsmith-${{ matrix.variant }}.exe"
+          $pkgName = "fixture-pex-${{ matrix.variant }}.txt"
+          $pkgVer = "$env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Force e2e | Out-Null
+          Set-Location e2e
+          "pex windows fixture variant=${{ matrix.variant }} run=$env:GITHUB_RUN_ID" `
+            | Out-File -Encoding ascii $pkgName
+          & $bin push raw "$env:CLOUDSMITH_NAMESPACE/$env:TEST_REPO_SLUG" $pkgName --name $pkgName --version $pkgVer
+          if ($LASTEXITCODE -ne 0) { throw "push failed: $LASTEXITCODE" }
+          & $bin download "$env:CLOUDSMITH_NAMESPACE/$env:TEST_REPO_SLUG" $pkgName --version $pkgVer --outfile "downloaded-$pkgName" --yes
+          if ($LASTEXITCODE -ne 0) { throw "download failed: $LASTEXITCODE" }
+          $a = (Get-FileHash $pkgName -Algorithm SHA256).Hash
+          $b = (Get-FileHash "downloaded-$pkgName" -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "Content mismatch: $a vs $b" }
+          Write-Host "PASS push/pull e2e ${{ matrix.variant }}"
+
+      - name: Record size + startup
+        shell: pwsh
+        run: |
+          $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
+          Get-Item $bin | Select-Object Name,Length
+          1..3 | ForEach-Object { Measure-Command { & $bin --version } | Select-Object TotalSeconds }
