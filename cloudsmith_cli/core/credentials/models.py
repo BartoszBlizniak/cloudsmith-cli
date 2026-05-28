@@ -12,16 +12,24 @@ import requests
 class CredentialContext:
     """Context passed to credential providers during resolution.
 
-    All values are populated directly from Click options / ``opts``.
+    Separate per-source fields allow the chain to evaluate sources in priority
+    order without conflating them. Populated from Click options in
+    ``resolve_credentials``.
     """
 
     session: requests.Session | None = None
-    api_key: str | None = None
+    api_key_from_flag: str | None = None
+    api_key_from_env: str | None = None
+    api_key_from_file: str | None = None
     api_host: str = "https://api.cloudsmith.io"
     creds_file_path: str | None = None
     profile: str | None = None
     debug: bool = False
     keyring_refresh_failed: bool = False
+    oidc_audience: str | None = None
+    oidc_org: str | None = None
+    oidc_service_slug: str | None = None
+    oidc_discovery_disabled: bool = False
 
 
 @dataclass
