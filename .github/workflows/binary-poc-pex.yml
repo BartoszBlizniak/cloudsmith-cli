@@ -164,16 +164,21 @@ jobs:
         # `check cryptography-selftest` subcommand. It is NOT in
         # `requirements.txt`, so we pass it as an additional req to PEX
         # so the resolved wheel set + scie include it.
+        #
+        # `--no-build` forces wheel-only resolution. On musl this is
+        # critical: PEX otherwise picks up sdists for `pydantic_core`
+        # and similar Rust-extension packages, and PBS-musl can fail to
+        # build them at runtime (`_pydantic_core` missing from the
+        # bundled scie).
         env:
           # The `science lift` step that builds the scie launcher calls
           # https://api.github.com/repos/astral-sh/python-build-standalone
           # to discover the PBS release. Unauthenticated GH-API hits get
-          # rate-limited (403) on shared CI runners. Pass the workflow
-          # token to lift the limit.
+          # rate-limited (403) on shared CI runners. The a-scie/lift
+          # accepts SCIENCE_AUTH_API_GITHUB_COM_BEARER.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PEX_SCIENCE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SCIENCE_NET_FETCH_GITHUB_API_BEARER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eux
           mkdir -p out
@@ -183,6 +188,7 @@ jobs:
             --console-script cloudsmith \
             --scie eager \
             --scie-platform "${{ matrix.scie-platform }}" \
+            --no-build \
             --venv
           chmod +x "${OUT}"
           ls -lh "${OUT}"
@@ -345,7 +351,7 @@ jobs:
             -e TEST_REPO_SLUG \
             -e GITHUB_RUN_ID \
             -e GITHUB_TOKEN \
-            -e SCIENCE_NET_FETCH_GITHUB_API_BEARER_TOKEN="${GITHUB_TOKEN}" \
+            -e SCIENCE_AUTH_API_GITHUB_COM_BEARER="${GITHUB_TOKEN}" \
             python:3.10-alpine sh -eux -c '
               apk add --no-cache git bash build-base musl-dev libffi-dev \
                 openssl-dev zlib-dev binutils ca-certificates curl coreutils \
@@ -363,6 +369,7 @@ jobs:
                 --console-script cloudsmith \
                 --scie eager \
                 --scie-platform musl-linux-aarch64 \
+                --no-build \
                 --venv
               chmod +x "${OUT}"
               ls -lh "${OUT}"
