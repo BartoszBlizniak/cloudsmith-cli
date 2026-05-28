@@ -97,23 +97,28 @@ jobs:
           - target: linux-amd64-glibc
             runs-on: ubuntu-latest
             scie-platform: linux-x86_64
+            complete-platform: .github/.platforms/linux-x86_64-py310.json
             shell: bash
           - target: linux-arm64-glibc
             runs-on: ubuntu-24.04-arm
             scie-platform: linux-aarch64
+            complete-platform: .github/.platforms/linux-aarch64-py310.json
             shell: bash
           - target: linux-amd64-musl
             runs-on: ubuntu-latest
             container: python:3.10-alpine
             scie-platform: musl-linux-x86_64
+            complete-platform: .github/.platforms/linux-x86_64-musl-py310.json
             shell: sh
           - target: macos-arm64
             runs-on: macos-latest
             scie-platform: macos-aarch64
+            complete-platform: .github/.platforms/macos-arm64-py310.json
             shell: bash
           - target: macos-amd64
             runs-on: macos-15-intel
             scie-platform: macos-x86_64
+            complete-platform: ""
             shell: bash
     runs-on: ${{ matrix.runs-on }}
     container: ${{ matrix.container }}
@@ -183,12 +188,22 @@ jobs:
           set -eux
           mkdir -p out
           OUT="out/cloudsmith-${{ matrix.target }}"
+          # Use the repo's `.github/.platforms/*.json` complete-platform
+          # files when one is available — they encode the wheel tags PEX
+          # should consider compatible, which matters on musl (so
+          # `musllinux_1_2` wheels for pydantic_core / cryptography are
+          # picked up instead of pip silently choosing an sdist).
+          CP_FLAGS=""
+          if [ -n "${{ matrix.complete-platform }}" ]; then
+            CP_FLAGS="--complete-platform ${{ matrix.complete-platform }}"
+          fi
+          # shellcheck disable=SC2086
           pex . cryptography \
             --output-file "${OUT}" \
             --console-script cloudsmith \
             --scie eager \
             --scie-platform "${{ matrix.scie-platform }}" \
-            --no-build \
+            ${CP_FLAGS} \
             --venv
           chmod +x "${OUT}"
           ls -lh "${OUT}"
@@ -369,7 +384,7 @@ jobs:
                 --console-script cloudsmith \
                 --scie eager \
                 --scie-platform musl-linux-aarch64 \
-                --no-build \
+                --complete-platform .github/.platforms/linux-aarch64-musl-py310.json \
                 --venv
               chmod +x "${OUT}"
               ls -lh "${OUT}"
