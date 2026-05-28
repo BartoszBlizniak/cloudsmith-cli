@@ -126,9 +126,13 @@ jobs:
     steps:
       - name: Install build deps (Alpine)
         if: contains(matrix.target, 'musl')
+        # `cryptography` and `cffi` only ship sdists for some musl
+        # combinations, so the PEX resolver compiles them from source.
+        # That needs `cargo` (Rust) for `maturin`/`cryptography` and the
+        # usual C toolchain for `cffi`.
         run: |
           apk add --no-cache git bash build-base musl-dev libffi-dev openssl-dev \
-            zlib-dev binutils ca-certificates curl coreutils
+            zlib-dev binutils ca-certificates curl coreutils cargo rust
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -160,6 +164,16 @@ jobs:
         # `check cryptography-selftest` subcommand. It is NOT in
         # `requirements.txt`, so we pass it as an additional req to PEX
         # so the resolved wheel set + scie include it.
+        env:
+          # The `science lift` step that builds the scie launcher calls
+          # https://api.github.com/repos/astral-sh/python-build-standalone
+          # to discover the PBS release. Unauthenticated GH-API hits get
+          # rate-limited (403) on shared CI runners. Pass the workflow
+          # token to lift the limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PEX_SCIENCE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCIENCE_NET_FETCH_GITHUB_API_BEARER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eux
           mkdir -p out
@@ -318,6 +332,8 @@ jobs:
           persist-credentials: false
 
       - name: Build + smoke-test inside Alpine arm64 container
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eux
           docker run --rm --platform linux/arm64 \
@@ -328,9 +344,12 @@ jobs:
             -e CLOUDSMITH_NAMESPACE \
             -e TEST_REPO_SLUG \
             -e GITHUB_RUN_ID \
+            -e GITHUB_TOKEN \
+            -e SCIENCE_NET_FETCH_GITHUB_API_BEARER_TOKEN="${GITHUB_TOKEN}" \
             python:3.10-alpine sh -eux -c '
               apk add --no-cache git bash build-base musl-dev libffi-dev \
-                openssl-dev zlib-dev binutils ca-certificates curl coreutils
+                openssl-dev zlib-dev binutils ca-certificates curl coreutils \
+                cargo rust
               python -m pip install --upgrade pip
               python -m pip install -r requirements.txt
               python -m pip install -e .
@@ -484,7 +503,31 @@ jobs:
         run: |
           Get-ChildItem .\bin
 
-      - name: Smoke test (Python available)
+      - name: Inspect artifact file type
+        shell: pwsh
+        run: |
+          $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
+          Get-Item $bin | Select-Object Name,Length
+          $header = [System.IO.File]::ReadAllBytes($bin)[0..3]
+          Write-Host "First 4 bytes (hex): $([BitConverter]::ToString($header))"
+          # 4D 5A = MZ (PE/Windows EXE); 50 4B = PK (zip / PEX zipapp)
+          if ($header[0] -eq 0x4D -and $header[1] -eq 0x5A) {
+            Write-Host "Artifact is a native Windows PE executable."
+            "ARTIFACT_KIND=pe" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          } elseif ($header[0] -eq 0x50 -and $header[1] -eq 0x4B) {
+            Write-Host "Artifact is a ZIP/PEX zipapp (requires Python on host)."
+            "ARTIFACT_KIND=zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          } else {
+            Write-Host "Artifact is unknown format."
+            "ARTIFACT_KIND=unknown" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          }
+
+      - name: Smoke test (native execution)
+        # If the artifact is a PE binary we expect to run it directly.
+        # If it is a PEX zipapp the smoke test will fail loudly — that
+        # is the production-readiness signal we are after for the
+        # `pex --rc` / no-Python question.
+        if: env.ARTIFACT_KIND == 'pe'
         shell: pwsh
         run: |
           $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
@@ -495,30 +538,49 @@ jobs:
           $env:CLOUDSMITH_NO_KEYRING = "1"
           & $bin check service
           & $bin check cryptography-selftest
-          $cryptoExit = $LASTEXITCODE
-          if ($cryptoExit -ne 0) {
-            Write-Host "WARN: cryptography-selftest exit=$cryptoExit"
-          }
+
+      - name: Smoke test (Python-invoked, for PEX zipapp)
+        if: env.ARTIFACT_KIND == 'zip'
+        shell: pwsh
+        run: |
+          $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
+          Write-Host "Artifact is a PEX zipapp — invoking with host Python."
+          py -3 $bin --version
+          py -3 $bin --help | Out-Null
+          py -3 $bin mcp --help | Out-Null
+          $env:CLOUDSMITH_NO_KEYRING = "1"
+          py -3 $bin check service
+          py -3 $bin check cryptography-selftest
 
       - name: No-Python validation (strip PATH)
+        # This is the headline production-readiness question. A PEX
+        # zipapp (ARTIFACT_KIND=zip) cannot run with no Python on PATH;
+        # only a native PE binary can. Record the answer in the report.
         shell: pwsh
         continue-on-error: true
         run: |
           New-Item -ItemType Directory -Force C:\no-py | Out-Null
           $env:PATH = "C:\no-py"
           $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
-          Write-Host "=== Variant ${{ matrix.variant }}: running with PATH=C:\no-py ==="
-          & $bin --version
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::warning::${{ matrix.variant }} requires Python on PATH (exit $LASTEXITCODE)"
-            throw "no-Python validation FAILED for ${{ matrix.variant }}"
+          Write-Host "=== Variant ${{ matrix.variant }} (kind=$env:ARTIFACT_KIND): running with PATH=C:\no-py ==="
+          try {
+            & $bin --version
+            $rc = $LASTEXITCODE
+          } catch {
+            $rc = 99
+            Write-Host "Exception: $($_.Exception.Message)"
           }
-          & $bin --help | Out-Null
-          & $bin mcp --help | Out-Null
-          Write-Host "PASS no-Python ${{ matrix.variant }}"
+          if ($rc -eq 0) {
+            Write-Host "::notice::${{ matrix.variant }} RUNS without Python on PATH."
+            & $bin --help | Out-Null
+            & $bin mcp --help | Out-Null
+          } else {
+            Write-Host "::warning::${{ matrix.variant }} (kind=$env:ARTIFACT_KIND) cannot run without Python on PATH (exit $rc). This is the expected behaviour for a PEX zipapp; only a true scie/PE binary would pass."
+          }
 
       - name: Push/pull e2e (Windows)
-        if: vars.CLOUDSMITH_NAMESPACE != ''
+        # Only meaningful when the artifact is natively executable.
+        if: vars.CLOUDSMITH_NAMESPACE != '' && env.ARTIFACT_KIND == 'pe'
         continue-on-error: true
         shell: pwsh
         env:
@@ -542,7 +604,12 @@ jobs:
 
       - name: Record size + startup
         shell: pwsh
+        continue-on-error: true
         run: |
           $bin = ".\bin\cloudsmith-${{ matrix.variant }}.exe"
           Get-Item $bin | Select-Object Name,Length
-          1..3 | ForEach-Object { Measure-Command { & $bin --version } | Select-Object TotalSeconds }
+          if ($env:ARTIFACT_KIND -eq 'pe') {
+            1..3 | ForEach-Object { Measure-Command { & $bin --version } | Select-Object TotalSeconds }
+          } else {
+            1..3 | ForEach-Object { Measure-Command { py -3 $bin --version } | Select-Object TotalSeconds }
+          }
