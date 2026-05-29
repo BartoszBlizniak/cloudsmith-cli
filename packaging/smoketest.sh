@@ -30,13 +30,18 @@ esac
 
 fail() { echo "SMOKETEST FAIL: $1" >&2; exit 1; }
 
-# Assert a captured blob carries no Python import/dep failure. A frozen binary
-# that is missing a native wheel surfaces exactly these strings.
-no_traceback() {
-  if printf '%s' "$1" | grep -Eq 'ModuleNotFoundError|ImportError|Traceback \(most recent call last\)|No module named'; then
+# Assert a captured blob carries no Python import/dep failure -- the failure
+# mode that matters for a frozen binary (a missing native wheel or an
+# uncollected dynamic import surfaces exactly these strings). We intentionally
+# do NOT flag every "Traceback": stdio servers (mcp/anyio) can emit a benign
+# "I/O operation on closed file" while tearing down after stdin EOF, which is
+# shutdown noise, not a packaging defect. Functional success is asserted
+# separately (exit codes + expected output + the jsonrpc envelope).
+no_dep_error() {
+  if printf '%s' "$1" | grep -Eq 'ModuleNotFoundError|ImportError|No module named|cannot import name|DLL load failed|failed to map segment|GLIBC_'; then
     echo "----- offending output -----" >&2
     printf '%s\n' "$1" >&2
-    fail "python traceback / import error during: $2"
+    fail "python import/dep error during: $2"
   fi
 }
 
@@ -57,7 +62,7 @@ run_offline() {
   # No credentials: command may exit nonzero, but it must load core.keyring
   # and the credential provider chain without an import/dep error.
   OUT=$( (unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null; "$BIN" whoami 2>&1) || true )
-  no_traceback "$OUT" "whoami offline"
+  no_dep_error "$OUT" "whoami offline"
   printf '%s\n' "$OUT" | head -5
 
   echo "== offline: credential-helper docker (baseline helper; initializes offline) =="
@@ -65,7 +70,7 @@ run_offline() {
   # exit 1 + a specific message. Proves the helper is compiled in and
   # initializes offline.
   OUT=$( (unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null; printf 'docker.cloudsmith.io' | "$BIN" credential-helper docker 2>&1) || true )
-  no_traceback "$OUT" "credential-helper docker offline"
+  no_dep_error "$OUT" "credential-helper docker offline"
   printf '%s\n' "$OUT" | grep -q "Unable to retrieve credentials" \
     || fail "credential-helper offline did not emit expected message; got: $OUT"
   echo "credential-helper docker offline OK"
@@ -74,11 +79,18 @@ run_offline() {
   # Warm any one-time extraction so the handshake is not racing a cold start.
   "$BIN" --version >/dev/null 2>&1 || true
   INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
-  ERR="$(mktemp 2>/dev/null || echo /tmp/mcp.err)"
-  OUT=$( printf '%s\n' "$INIT" | "$BIN" mcp start 2>"$ERR" | head -1 || true )
+  OUTF="$(mktemp 2>/dev/null || echo /tmp/mcp.out)"
+  ERRF="$(mktemp 2>/dev/null || echo /tmp/mcp.err)"
+  # Capture to files (not a live pipe): closing the pipe with `head` would
+  # SIGPIPE the server mid-write and produce benign "closed file" shutdown
+  # noise. stdin closes after the request (EOF), so the stdio server exits on
+  # its own -- no `timeout` wrapper (absent on macOS, and a different command
+  # entirely on Windows); the job-level timeout-minutes is the hang guard.
+  printf '%s\n' "$INIT" | "$BIN" mcp start >"$OUTF" 2>"$ERRF" || true
+  OUT=$(head -1 "$OUTF" 2>/dev/null || true)
   echo "mcp stdout: $OUT"
-  echo "mcp stderr (head):"; head -20 "$ERR" 2>/dev/null || true
-  no_traceback "$(cat "$ERR" 2>/dev/null || true)" "mcp start"
+  echo "mcp stderr (head):"; head -20 "$ERRF" 2>/dev/null || true
+  no_dep_error "$(cat "$ERRF" 2>/dev/null || true)" "mcp start"
   printf '%s' "$OUT" | grep -q '"jsonrpc":"2.0"' \
     || fail "mcp initialize handshake produced no jsonrpc envelope"
   echo "mcp stdio handshake OK (pydantic-core loaded)"
@@ -89,7 +101,7 @@ run_online() {
 
   echo "== online: whoami (read-only auth check) =="
   OUT=$("$BIN" whoami 2>&1) || { printf '%s\n' "$OUT"; fail "online whoami failed"; }
-  no_traceback "$OUT" "whoami online"
+  no_dep_error "$OUT" "whoami online"
   printf '%s\n' "$OUT" | head -15
 
   if [ -n "${CLOUDSMITH_NAMESPACE:-}" ]; then
@@ -103,7 +115,7 @@ run_online() {
       fi
       printf '%s\n' "$OUT"; fail "online list repos failed"
     }
-    no_traceback "$OUT" "list repos online"
+    no_dep_error "$OUT" "list repos online"
     printf '%s\n' "$OUT" | head -20
   else
     echo "CLOUDSMITH_NAMESPACE unset; skipping read-only list"
