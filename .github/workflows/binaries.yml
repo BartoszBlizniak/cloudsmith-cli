@@ -1,0 +1,192 @@
+name: binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      online_smoketest:
+        description: Run read-only online smoketest on linux-x86_64-gnu
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.gen.outputs.include }}
+    steps:
+      - id: gen
+        run: |
+          cat > include.json <<'JSON'
+          {"include":[
+            {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","test_runner":"ubuntu-24.04","test_kind":"docker","image":"debian:stable-slim","ext":""},
+            {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","test_runner":"ubuntu-24.04","test_kind":"docker","image":"alpine:3.20","ext":""},
+            {"name":"linux-aarch64-gnu","build_runner":"ubuntu-24.04-arm","mode":"native","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"debian:stable-slim","ext":""},
+            {"name":"linux-aarch64-musl","build_runner":"ubuntu-24.04-arm","mode":"alpine","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"alpine:3.20","ext":""},
+            {"name":"macos-arm64","build_runner":"macos-14","mode":"native","test_runner":"macos-14","test_kind":"macos","image":"","ext":""},
+            {"name":"macos-x86_64","build_runner":"macos-15-intel","mode":"native","test_runner":"macos-15-intel","test_kind":"macos","image":"","ext":""},
+            {"name":"windows-x86_64","build_runner":"windows-2025","mode":"windows","test_runner":"windows-2025","test_kind":"windows","image":"","ext":".exe"}
+          ]}
+          JSON
+          echo "include=$(jq -c . include.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix.outputs.include) }}
+    runs-on: ${{ matrix.build_runner }}
+    timeout-minutes: 45
+    env:
+      PYINSTALLER_VERSION: "6.20.0"
+      PYTHON_VERSION: "3.12"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - if: matrix.mode != 'alpine'
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - id: art
+        shell: bash
+        env:
+          TARGET: ${{ matrix.name }}
+          EXT: ${{ matrix.ext }}
+        run: echo "name=cloudsmith-$(cat cloudsmith_cli/data/VERSION)-${TARGET}${EXT}" >> "$GITHUB_OUTPUT"
+
+      - if: matrix.mode == 'native'
+        shell: bash
+        env:
+          ART: ${{ steps.art.outputs.name }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install . "pyinstaller==${PYINSTALLER_VERSION}"
+          rm -rf dist build
+          pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+          mkdir -p out
+          mv dist/cloudsmith "out/${ART}"
+          chmod +x "out/${ART}"
+
+      - if: matrix.mode == 'alpine'
+        env:
+          ART: ${{ steps.art.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm \
+            -e PYINSTALLER_VERSION="${PYINSTALLER_VERSION}" \
+            -e ART="${ART}" \
+            -v "${PWD}:/src" -w /src \
+            python:3.12-alpine sh -c '
+              set -e
+              apk add --no-cache build-base zlib-dev libffi-dev >/dev/null
+              python -m pip install --upgrade pip >/dev/null
+              pip install . "pyinstaller==${PYINSTALLER_VERSION}" >/dev/null
+              rm -rf dist build
+              pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+              mv dist/cloudsmith "out/${ART}"
+              chmod +x "out/${ART}"
+            '
+
+      - if: matrix.mode == 'windows'
+        shell: bash
+        env:
+          ART: ${{ steps.art.outputs.name }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install . "pyinstaller==${PYINSTALLER_VERSION}"
+          rm -rf dist build
+          pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+          mkdir -p out
+          mv dist/cloudsmith.exe "out/${ART}"
+
+      - shell: bash
+        env:
+          ART: ${{ steps.art.outputs.name }}
+        run: |
+          set -euo pipefail
+          cd out
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ART}" | tee "${ART}.sha256"
+          else
+            shasum -a 256 "${ART}" | tee "${ART}.sha256"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloudsmith-${{ matrix.name }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+  test:
+    needs: [matrix, build]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix.outputs.include) }}
+    runs-on: ${{ matrix.test_runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cloudsmith-${{ matrix.name }}
+          path: ./dl
+
+      - if: matrix.test_kind == 'docker'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          docker run --rm -e BIN="${BIN}" -v "${PWD}:/w" -w /w "${IMAGE}" sh -c '
+            if command -v python3 >/dev/null 2>&1; then echo "python3 present on host"; exit 1; fi
+            sh packaging/smoketest.sh "dl/${BIN}" offline
+          '
+
+      - if: matrix.test_kind == 'macos'
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          codesign -s - -f "dl/${BIN}" || true
+          env -i HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" "${PWD}/dl/${BIN}" --version
+          sh packaging/smoketest.sh "dl/${BIN}" offline
+
+      - if: matrix.test_kind == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          sh packaging/smoketest.sh "dl/${BIN}" offline
+
+      - name: Online read-only smoketest
+        if: ${{ matrix.name == 'linux-x86_64-gnu' && (github.event_name == 'push' || inputs.online_smoketest) }}
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          [ -n "${CLOUDSMITH_API_KEY:-}" ] || { echo "CLOUDSMITH_API_KEY unset; skipping online smoketest"; exit 0; }
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          sh packaging/smoketest.sh "dl/${BIN}" online
