@@ -1,0 +1,295 @@
+name: binary-pyinstaller
+
+# Standalone single-binary spike: PyInstaller --onefile (embedded CPython).
+# Dispatch-only so runs are serial and deliberate -- no push noise.
+#
+# Same shared contract as binary-pex (Python 3.12, identical
+# packaging/smoketest.sh, pinned runners) so the two packagers compare fairly.
+# Unlike PEX, PyInstaller builds Windows -- windows-x86_64 is included here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Target to build/test (or "all")
+        type: choice
+        default: linux-x86_64-gnu
+        options:
+          - linux-x86_64-gnu
+          - linux-x86_64-musl
+          - linux-aarch64-gnu
+          - linux-aarch64-musl
+          - macos-arm64
+          - macos-x86_64
+          - windows-x86_64
+          - all
+      run_online:
+        description: Run read-only online smoketests (whoami + list) on linux-x86_64-gnu only
+        type: boolean
+        default: false
+      pyinstaller_version:
+        description: PyInstaller version pin
+        type: string
+        default: "6.20.0"
+      python_version:
+        description: Build interpreter Python version
+        type: string
+        default: "3.12"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binary-pyinstaller-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: setup matrix (${{ inputs.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Build matrix from target input
+        id: gen
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          ALL='[
+            {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","smoke_runner":"ubuntu-24.04","smoke_kind":"docker","smoke_image":"debian:stable-slim","ext":""},
+            {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","smoke_runner":"ubuntu-24.04","smoke_kind":"docker","smoke_image":"alpine:3.20","ext":""},
+            {"name":"linux-aarch64-gnu","build_runner":"ubuntu-24.04-arm","mode":"native","smoke_runner":"ubuntu-24.04-arm","smoke_kind":"docker","smoke_image":"debian:stable-slim","ext":""},
+            {"name":"linux-aarch64-musl","build_runner":"ubuntu-24.04-arm","mode":"alpine","smoke_runner":"ubuntu-24.04-arm","smoke_kind":"docker","smoke_image":"alpine:3.20","ext":""},
+            {"name":"macos-arm64","build_runner":"macos-14","mode":"native","smoke_runner":"macos-14","smoke_kind":"macos","smoke_image":"","ext":""},
+            {"name":"macos-x86_64","build_runner":"macos-15-intel","mode":"native","smoke_runner":"macos-15-intel","smoke_kind":"macos","smoke_image":"","ext":""},
+            {"name":"windows-x86_64","build_runner":"windows-2025","mode":"windows","smoke_runner":"windows-2025","smoke_kind":"windows","smoke_image":"","ext":".exe"}
+          ]'
+          if [ "$TARGET" = "all" ]; then
+            M=$(echo "$ALL" | jq -c '{include: .}')
+          else
+            M=$(echo "$ALL" | jq -c --arg t "$TARGET" '{include: [.[] | select(.name==$t)]}')
+          fi
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "Selected matrix: $M"
+
+  build:
+    name: build ${{ matrix.name }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.build_runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        if: matrix.mode != 'alpine'
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Resolve artifact name
+        id: art
+        shell: bash
+        env:
+          TARGET: ${{ matrix.name }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          VERSION=$(cat cloudsmith_cli/data/VERSION)
+          NAME="cloudsmith-${VERSION}-${GITHUB_SHA::7}-${TARGET}${EXT}"
+          {
+            echo "version=${VERSION}"
+            echo "name=${NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build onefile (native unix)
+        if: matrix.mode == 'native'
+        shell: bash
+        env:
+          PYI_VERSION: ${{ inputs.pyinstaller_version }}
+          ART: ${{ steps.art.outputs.name }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install . "pyinstaller==${PYI_VERSION}"
+          rm -rf dist build
+          pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+          test -f dist/cloudsmith
+          mkdir -p out
+          mv dist/cloudsmith "out/${ART}"
+          chmod +x "out/${ART}"
+
+      - name: Build onefile (musl, in python:3.12-alpine)
+        if: matrix.mode == 'alpine'
+        env:
+          PYI_VERSION: ${{ inputs.pyinstaller_version }}
+          ART: ${{ steps.art.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm \
+            -e PYI_VERSION="${PYI_VERSION}" \
+            -e ART="${ART}" \
+            -v "${PWD}:/src" -w /src \
+            python:3.12-alpine sh -c '
+              set -e
+              apk add --no-cache build-base zlib-dev libffi-dev >/dev/null
+              python -m pip install --upgrade pip >/dev/null
+              pip install . "pyinstaller==${PYI_VERSION}" >/dev/null
+              rm -rf dist build
+              pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+              test -f dist/cloudsmith
+              mv dist/cloudsmith "out/${ART}"
+              chmod +x "out/${ART}"
+            '
+
+      - name: Build onefile (windows)
+        if: matrix.mode == 'windows'
+        shell: bash
+        env:
+          PYI_VERSION: ${{ inputs.pyinstaller_version }}
+          ART: ${{ steps.art.outputs.name }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install . "pyinstaller==${PYI_VERSION}"
+          rm -rf dist build
+          pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+          test -f dist/cloudsmith.exe
+          mkdir -p out
+          mv dist/cloudsmith.exe "out/${ART}"
+
+      - name: Record size + SHA256
+        shell: bash
+        env:
+          ART: ${{ steps.art.outputs.name }}
+          TARGET: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          cd out
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ART}" | tee "${ART}.sha256"
+            SHA=$(sha256sum "${ART}" | awk '{print $1}')
+          else
+            shasum -a 256 "${ART}" | tee "${ART}.sha256"
+            SHA=$(shasum -a 256 "${ART}" | awk '{print $1}')
+          fi
+          SIZE=$(stat -c%s "${ART}" 2>/dev/null || stat -f%z "${ART}")
+          {
+            echo "### build ${TARGET}"
+            echo ""
+            echo "| field | value |"
+            echo "|-------|-------|"
+            echo "| artifact | \`${ART}\` |"
+            echo "| size | $((SIZE / 1024 / 1024)) MiB (${SIZE} bytes) |"
+            echo "| sha256 | \`${SHA}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloudsmith-pyi-${{ matrix.name }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+  smoke:
+    name: smoke ${{ matrix.name }}
+    needs: [setup, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.smoke_runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout (for packaging/smoketest.sh)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cloudsmith-pyi-${{ matrix.name }}
+          path: ./dl
+
+      - name: Clean-room offline smoketest (Linux, no Python on host)
+        if: matrix.smoke_kind == 'docker'
+        env:
+          SMOKE_IMAGE: ${{ matrix.smoke_image }}
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          echo "Binary under test: ${BIN} in ${SMOKE_IMAGE}"
+          docker run --rm \
+            -e BIN="${BIN}" \
+            -v "${PWD}:/w" -w /w \
+            "${SMOKE_IMAGE}" sh -c '
+              if command -v python3 >/dev/null 2>&1; then
+                echo "FAIL: python3 present on host; clean-room test invalid"; exit 1
+              fi
+              sh packaging/smoketest.sh "dl/${BIN}" offline
+            '
+
+      - name: Clean-room offline smoketest (macOS)
+        if: matrix.smoke_kind == 'macos'
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          codesign -s - -f "dl/${BIN}" || true
+          echo "Standalone (empty PATH, no python3) check:"
+          env -i HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" "${PWD}/dl/${BIN}" --version
+          sh packaging/smoketest.sh "dl/${BIN}" offline
+
+      - name: Offline smoketest (Windows)
+        if: matrix.smoke_kind == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          echo "Binary under test: ${BIN}"
+          # windows-hosted runners always have Python on PATH, so a strict
+          # "no python" clean room is not possible; the onefile bundles its own
+          # interpreter and never uses the host's. Run the functional smoketest.
+          sh packaging/smoketest.sh "dl/${BIN}" offline
+
+      - name: Online read-only smoketest (linux-x86_64-gnu only)
+        if: ${{ inputs.run_online && matrix.name == 'linux-x86_64-gnu' }}
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          sh packaging/smoketest.sh "dl/${BIN}" online
+
+  summary:
+    name: pyinstaller spike summary
+    needs: [setup, build, smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate
+        env:
+          R_BUILD: ${{ needs.build.result }}
+          R_SMOKE: ${{ needs.smoke.result }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          {
+            echo "## binary-pyinstaller spike (target: ${TARGET})"
+            echo ""
+            echo "| stage | result |"
+            echo "|-------|--------|"
+            echo "| build | ${R_BUILD} |"
+            echo "| smoke | ${R_SMOKE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
