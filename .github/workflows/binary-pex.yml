@@ -1,0 +1,293 @@
+name: binary-pex
+
+# Standalone single-binary spike: PEX + `--scie eager` (embedded portable
+# CPython). Dispatch-only so runs are serial and deliberate -- no push noise.
+#
+# Drive ONE target at a time with the `target` input while iterating; flip to
+# `all` for the final clean run.
+#
+# Windows is intentionally absent: PEX 2.95.2 `--scie-platform` only accepts
+# {linux,musl-linux}-{x86_64,aarch64} and macos-{aarch64,x86_64} -- there is no
+# windows scie target. Windows is covered by the binary-pyinstaller branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Target to build/test (or "all")
+        type: choice
+        default: linux-x86_64-gnu
+        options:
+          - linux-x86_64-gnu
+          - linux-x86_64-musl
+          - linux-aarch64-gnu
+          - linux-aarch64-musl
+          - macos-arm64
+          - macos-x86_64
+          - all
+      run_online:
+        description: Run read-only online smoketests (whoami + list) on linux-x86_64-gnu only
+        type: boolean
+        default: false
+      pex_version:
+        description: PEX version pin
+        type: string
+        default: "2.95.2"
+      python_version:
+        description: Build interpreter Python version
+        type: string
+        default: "3.12"
+
+permissions:
+  contents: read
+
+# Serial by design: a new dispatch cancels an in-flight one rather than
+# queueing mac/Windows-style backlog.
+concurrency:
+  group: binary-pex-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: setup matrix (${{ inputs.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Build matrix from target input
+        id: gen
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          ALL='[
+            {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","smoke_runner":"ubuntu-24.04","smoke_kind":"docker","smoke_image":"debian:stable-slim"},
+            {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","smoke_runner":"ubuntu-24.04","smoke_kind":"docker","smoke_image":"alpine:3.20"},
+            {"name":"linux-aarch64-gnu","build_runner":"ubuntu-24.04-arm","mode":"native","smoke_runner":"ubuntu-24.04-arm","smoke_kind":"docker","smoke_image":"debian:stable-slim"},
+            {"name":"linux-aarch64-musl","build_runner":"ubuntu-24.04-arm","mode":"alpine","smoke_runner":"ubuntu-24.04-arm","smoke_kind":"docker","smoke_image":"alpine:3.20"},
+            {"name":"macos-arm64","build_runner":"macos-14","mode":"native","smoke_runner":"macos-14","smoke_kind":"macos","smoke_image":""},
+            {"name":"macos-x86_64","build_runner":"macos-15-intel","mode":"native","smoke_runner":"macos-15-intel","smoke_kind":"macos","smoke_image":""}
+          ]'
+          if [ "$TARGET" = "all" ]; then
+            M=$(echo "$ALL" | jq -c '{include: .}')
+          else
+            M=$(echo "$ALL" | jq -c --arg t "$TARGET" '{include: [.[] | select(.name==$t)]}')
+          fi
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "Selected matrix: $M"
+
+  build:
+    name: build ${{ matrix.name }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.build_runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        if: matrix.mode == 'native'
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Resolve artifact name
+        id: art
+        env:
+          TARGET: ${{ matrix.name }}
+        run: |
+          VERSION=$(cat cloudsmith_cli/data/VERSION)
+          NAME="cloudsmith-${VERSION}-${GITHUB_SHA::7}-${TARGET}"
+          {
+            echo "version=${VERSION}"
+            echo "name=${NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build PEX scie (native)
+        if: matrix.mode == 'native'
+        env:
+          PEX_VERSION: ${{ inputs.pex_version }}
+          ART: ${{ steps.art.outputs.name }}
+          # science (the scie lift tool pex shells out to) reads the GitHub API
+          # to resolve the python-build-standalone tarball. The 60/hr
+          # unauthenticated quota is shared across the runner fleet IP pool and
+          # is routinely exhausted; authenticate to get the 5,000/hr quota.
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install "pex==${PEX_VERSION}" setuptools wheel
+          mkdir -p dist
+          pex . \
+            --console-script cloudsmith \
+            --scie eager \
+            --scie-only \
+            --venv \
+            -o "dist/${ART}"
+          # --scie-only + -o yields exactly dist/${ART}; locate defensively.
+          if [ ! -f "dist/${ART}" ]; then
+            FOUND=$(ls -S dist/ | grep -v '\.sha256$' | head -1)
+            mv "dist/${FOUND}" "dist/${ART}"
+          fi
+          chmod +x "dist/${ART}"
+
+      - name: Build PEX scie (musl, in python:3.12-alpine)
+        if: matrix.mode == 'alpine'
+        env:
+          PEX_VERSION: ${{ inputs.pex_version }}
+          ART: ${{ steps.art.outputs.name }}
+          GH_BEARER: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Build natively inside a musl interpreter -> resolves musllinux
+          # wheels and produces a musl scie with no cross-compile / complete-
+          # platform JSON needed. Runner arch (x86_64 or arm64) selects the
+          # matching alpine image automatically.
+          docker run --rm \
+            -e PEX_VERSION="${PEX_VERSION}" \
+            -e ART="${ART}" \
+            -e SCIENCE_AUTH_API_GITHUB_COM_BEARER="${GH_BEARER}" \
+            -v "${PWD}:/src" -w /src \
+            python:3.12-alpine sh -c '
+              set -e
+              apk add --no-cache build-base libffi-dev >/dev/null
+              python -m pip install --upgrade pip >/dev/null
+              pip install "pex==${PEX_VERSION}" setuptools wheel >/dev/null
+              pex . \
+                --console-script cloudsmith \
+                --scie eager \
+                --scie-only \
+                --venv \
+                -o "dist/${ART}"
+              if [ ! -f "dist/${ART}" ]; then
+                FOUND=$(ls -S dist/ | grep -v "\.sha256$" | head -1)
+                mv "dist/${FOUND}" "dist/${ART}"
+              fi
+              chmod +x "dist/${ART}"
+            '
+
+      - name: Record size + SHA256
+        env:
+          ART: ${{ steps.art.outputs.name }}
+          TARGET: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 "${ART}" | tee "${ART}.sha256"
+          SIZE=$(stat -c%s "${ART}" 2>/dev/null || stat -f%z "${ART}")
+          SHA=$(shasum -a 256 "${ART}" | awk '{print $1}')
+          {
+            echo "### build ${TARGET}"
+            echo ""
+            echo "| field | value |"
+            echo "|-------|-------|"
+            echo "| artifact | \`${ART}\` |"
+            echo "| size | $((SIZE / 1024 / 1024)) MiB (${SIZE} bytes) |"
+            echo "| sha256 | \`${SHA}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloudsmith-pex-${{ matrix.name }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  smoke:
+    name: smoke ${{ matrix.name }}
+    needs: [setup, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.smoke_runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout (for packaging/smoketest.sh)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cloudsmith-pex-${{ matrix.name }}
+          path: ./dl
+
+      - name: Clean-room offline smoketest (Linux, no Python on host)
+        if: matrix.smoke_kind == 'docker'
+        env:
+          SMOKE_IMAGE: ${{ matrix.smoke_image }}
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          echo "Binary under test: ${BIN} in ${SMOKE_IMAGE}"
+          docker run --rm \
+            -e BIN="${BIN}" \
+            -v "${PWD}:/w" -w /w \
+            "${SMOKE_IMAGE}" sh -c '
+              if command -v python3 >/dev/null 2>&1; then
+                echo "FAIL: python3 present on host; clean-room test invalid"; exit 1
+              fi
+              sh packaging/smoketest.sh "dl/${BIN}" offline
+            '
+
+      - name: Clean-room offline smoketest (macOS)
+        if: matrix.smoke_kind == 'macos'
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          # Ad-hoc sign so Gatekeeper lets the unsigned binary execute.
+          codesign -s - -f "dl/${BIN}" || true
+          # Prove standalone: run with a stripped environment -- empty PATH
+          # (so no system python3) but keep HOME/TMPDIR for the scie's one-time
+          # extraction cache. The scie uses only its embedded interpreter.
+          echo "Standalone (empty PATH, no python3) check:"
+          env -i HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" "${PWD}/dl/${BIN}" --version
+          # Functional smoketest with normal env (utilities available).
+          sh packaging/smoketest.sh "dl/${BIN}" offline
+
+      - name: Online read-only smoketest (linux-x86_64-gnu only)
+        if: ${{ inputs.run_online && matrix.name == 'linux-x86_64-gnu' }}
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
+          chmod +x "dl/${BIN}"
+          sh packaging/smoketest.sh "dl/${BIN}" online
+
+  summary:
+    name: pex spike summary
+    needs: [setup, build, smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate
+        env:
+          R_BUILD: ${{ needs.build.result }}
+          R_SMOKE: ${{ needs.smoke.result }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          {
+            echo "## binary-pex spike (target: ${TARGET})"
+            echo ""
+            echo "| stage | result |"
+            echo "|-------|--------|"
+            echo "| build | ${R_BUILD} |"
+            echo "| smoke | ${R_SMOKE} |"
+            echo ""
+            echo "**Windows excluded:** PEX 2.95.2 \`--scie-platform\` has no"
+            echo "windows target. Windows is covered by binary-pyinstaller."
+          } >> "$GITHUB_STEP_SUMMARY"
