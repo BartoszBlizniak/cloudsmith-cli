@@ -83,9 +83,10 @@ run_offline() {
   ERRF="$(mktemp 2>/dev/null || echo /tmp/mcp.err)"
   # Capture to files (not a live pipe): closing the pipe with `head` would
   # SIGPIPE the server mid-write and produce benign "closed file" shutdown
-  # noise. stdin closes after the request (EOF), so the stdio server exits
-  # cleanly; the timeout is only a hang guard.
-  printf '%s\n' "$INIT" | timeout 45 "$BIN" mcp start >"$OUTF" 2>"$ERRF" || true
+  # noise. stdin closes after the request (EOF), so the stdio server exits on
+  # its own -- no `timeout` wrapper (absent on macOS, and a different command
+  # entirely on Windows); the job-level timeout-minutes is the hang guard.
+  printf '%s\n' "$INIT" | "$BIN" mcp start >"$OUTF" 2>"$ERRF" || true
   OUT=$(head -1 "$OUTF" 2>/dev/null || true)
   echo "mcp stdout: $OUT"
   echo "mcp stderr (head):"; head -20 "$ERRF" 2>/dev/null || true
