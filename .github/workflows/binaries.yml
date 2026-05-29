@@ -27,7 +27,7 @@ jobs:
     steps:
       - id: gen
         run: |
-          cat > include.json <<'JSON'
+          echo "include=$(jq -c . <<'JSON'
           {"include":[
             {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","test_runner":"ubuntu-24.04","test_kind":"docker","image":"debian:stable-slim","ext":""},
             {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","test_runner":"ubuntu-24.04","test_kind":"docker","image":"alpine:3.20","ext":""},
@@ -38,7 +38,7 @@ jobs:
             {"name":"windows-x86_64","build_runner":"windows-2025","mode":"windows","test_runner":"windows-2025","test_kind":"windows","image":"","ext":".exe"}
           ]}
           JSON
-          echo "include=$(jq -c . include.json)" >> "$GITHUB_OUTPUT"
+          )" >> "$GITHUB_OUTPUT"
 
   build:
     needs: matrix
@@ -75,11 +75,9 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install . "pyinstaller==${PYINSTALLER_VERSION}"
-          rm -rf dist build
           pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
           mkdir -p out
           mv dist/cloudsmith "out/${ART}"
-          chmod +x "out/${ART}"
 
       - if: matrix.mode == 'alpine'
         env:
@@ -96,10 +94,8 @@ jobs:
               apk add --no-cache build-base zlib-dev libffi-dev >/dev/null
               python -m pip install --root-user-action=ignore --upgrade pip >/dev/null
               pip install --root-user-action=ignore . "pyinstaller==${PYINSTALLER_VERSION}" >/dev/null
-              rm -rf dist build
               pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
               mv dist/cloudsmith "out/${ART}"
-              chmod +x "out/${ART}"
             '
 
       - if: matrix.mode == 'windows'
@@ -110,7 +106,6 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install . "pyinstaller==${PYINSTALLER_VERSION}"
-          rm -rf dist build
           pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
           mkdir -p out
           mv dist/cloudsmith.exe "out/${ART}"
