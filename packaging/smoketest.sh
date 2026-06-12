@@ -66,7 +66,13 @@ run_online() {
   [ -n "${CLOUDSMITH_API_KEY:-}" ] || fail "online mode but CLOUDSMITH_API_KEY is empty"
 
   echo "== whoami (online) =="
-  OUT=$("$BIN" whoami 2>&1) || { printf '%s\n' "$OUT"; fail "online whoami failed"; }
+  OUT=$("$BIN" whoami 2>&1) || {
+    if printf '%s' "$OUT" | grep -Eq '429|rate limit|Too Many Requests'; then
+      echo "WARN: rate-limited (429) on whoami; shared org throttling, not a binary failure" >&2
+      return 0
+    fi
+    printf '%s\n' "$OUT"; fail "online whoami failed"
+  }
   no_dep_error "$OUT" "whoami online"
   printf '%s\n' "$OUT" | head -15
 

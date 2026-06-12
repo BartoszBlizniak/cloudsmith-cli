@@ -136,6 +136,14 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.include) }}
     runs-on: ${{ matrix.test_runner }}
     timeout-minutes: 25
+    # Online read-only smoketest runs on every target. It hits the shared org,
+    # so it stays read-only and the smoketest treats a 429 as a pass (the org
+    # throttling concurrent jobs is not a binary failure). Each binary is tested
+    # in its own runtime: musl in Alpine, glibc in Debian, macOS/Windows native.
+    env:
+      ONLINE: ${{ (github.event_name == 'push' || inputs.online_smoketest) && '1' || '' }}
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+      CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -157,6 +165,13 @@ jobs:
             if command -v python3 >/dev/null 2>&1; then echo "python3 present on host"; exit 1; fi
             sh packaging/smoketest.sh cloudsmith/cloudsmith offline
           '
+          if [ -n "${ONLINE}" ] && [ -n "${CLOUDSMITH_API_KEY:-}" ]; then
+            docker run --rm \
+              -e CLOUDSMITH_API_KEY -e CLOUDSMITH_NAMESPACE \
+              -v "${PWD}:/w" -w /w "${IMAGE}" sh -c '
+                sh packaging/smoketest.sh cloudsmith/cloudsmith online
+              '
+          fi
 
       - if: matrix.test_kind == 'macos'
         run: |
@@ -166,6 +181,9 @@ jobs:
           codesign -s - -f cloudsmith/cloudsmith || true
           env -i HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" "${PWD}/cloudsmith/cloudsmith" --version
           sh packaging/smoketest.sh cloudsmith/cloudsmith offline
+          if [ -n "${ONLINE}" ] && [ -n "${CLOUDSMITH_API_KEY:-}" ]; then
+            sh packaging/smoketest.sh cloudsmith/cloudsmith online
+          fi
 
       - if: matrix.test_kind == 'windows'
         shell: bash
@@ -174,13 +192,6 @@ jobs:
           ART=$(ls dl | grep -v '\.sha256$' | head -1)
           7z x -bso0 "dl/${ART}" -o.
           sh packaging/smoketest.sh cloudsmith/cloudsmith.exe offline
-
-      - name: Online read-only smoketest
-        if: ${{ matrix.name == 'linux-x86_64-gnu' && (github.event_name == 'push' || inputs.online_smoketest) }}
-        env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-          CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
-        run: |
-          set -euo pipefail
-          [ -n "${CLOUDSMITH_API_KEY:-}" ] || { echo "CLOUDSMITH_API_KEY unset; skipping online smoketest"; exit 0; }
-          sh packaging/smoketest.sh cloudsmith/cloudsmith online
+          if [ -n "${ONLINE}" ] && [ -n "${CLOUDSMITH_API_KEY:-}" ]; then
+            sh packaging/smoketest.sh cloudsmith/cloudsmith.exe online
+          fi
