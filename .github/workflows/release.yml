@@ -1,14 +1,33 @@
-name: Create Zipapp and Release
+name: Release
 
 on:
     push:
         tags:
             - "v*"
 
+permissions:
+    contents: read
+
+concurrency:
+    group: release-${{ github.ref }}
+
 jobs:
-    # Build and publish to GitHub, Cloudsmith (zipapp + Docker)
-    build:
-        name: Build and publish artifacts
+    # Build and clean-room smoketest the standalone binaries for every target.
+    # Publishing below reuses these exact artifacts, so what ships is what
+    # passed the smoketests.
+    binaries:
+        name: Binaries
+        uses: ./.github/workflows/binaries.yml
+        permissions:
+            contents: read
+            id-token: write
+        secrets:
+            CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+
+    # Publish to GitHub and Cloudsmith (binaries + Python packages + Docker)
+    publish:
+        name: Publish release artifacts
+        needs: binaries
         runs-on: ubuntu-latest
         permissions:
             id-token: write
@@ -28,57 +47,20 @@ jobs:
               with:
                   python-version: '3.10'
 
-            - name: Install build dependencies
-              run: |
-                  python -m pip install --upgrade pip
-                  pip install pex setuptools wheel
-
             - name: Get version
-              id: get_version
               run: echo "VERSION=$(cat cloudsmith_cli/data/VERSION)" >> $GITHUB_ENV
 
-            - name: Create multi-platform Zipapp with PEX
-              run: |
-                pex . \
-                  --output-file "cloudsmith.pyz" \
-                  --console-script cloudsmith \
-                  --python-shebang "/usr/bin/env python3" \
-                  --venv \
-                  --complete-platform .github/.platforms/linux-x86_64-py310.json \
-                  --complete-platform .github/.platforms/linux-aarch64-py310.json \
-                  --complete-platform .github/.platforms/linux-x86_64-musl-py310.json \
-                  --complete-platform .github/.platforms/linux-aarch64-musl-py310.json \
-                  --complete-platform .github/.platforms/macos-arm64-py310.json \
-                  --complete-platform .github/.platforms/windows-x86_64-py310.json \
-                  --complete-platform .github/.platforms/linux-x86_64-py311.json \
-                  --complete-platform .github/.platforms/linux-aarch64-py311.json \
-                  --complete-platform .github/.platforms/linux-x86_64-musl-py311.json \
-                  --complete-platform .github/.platforms/linux-aarch64-musl-py311.json \
-                  --complete-platform .github/.platforms/macos-arm64-py311.json \
-                  --complete-platform .github/.platforms/windows-x86_64-py311.json \
-                  --complete-platform .github/.platforms/linux-x86_64-py312.json \
-                  --complete-platform .github/.platforms/linux-aarch64-py312.json \
-                  --complete-platform .github/.platforms/linux-x86_64-musl-py312.json \
-                  --complete-platform .github/.platforms/linux-aarch64-musl-py312.json \
-                  --complete-platform .github/.platforms/macos-arm64-py312.json \
-                  --complete-platform .github/.platforms/windows-x86_64-py312.json \
-                  --complete-platform .github/.platforms/linux-x86_64-py313.json \
-                  --complete-platform .github/.platforms/linux-aarch64-py313.json \
-                  --complete-platform .github/.platforms/linux-x86_64-musl-py313.json \
-                  --complete-platform .github/.platforms/linux-aarch64-musl-py313.json \
-                  --complete-platform .github/.platforms/macos-arm64-py313.json \
-                  --complete-platform .github/.platforms/windows-x86_64-py313.json \
-                  --complete-platform .github/.platforms/linux-x86_64-py314.json \
-                  --complete-platform .github/.platforms/linux-aarch64-py314.json \
-                  --complete-platform .github/.platforms/linux-x86_64-musl-py314.json \
-                  --complete-platform .github/.platforms/linux-aarch64-musl-py314.json \
-                  --complete-platform .github/.platforms/macos-arm64-py314.json \
-                  --complete-platform .github/.platforms/windows-x86_64-py314.json
+            - name: Download binary artifacts
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  pattern: cloudsmith-*
+                  merge-multiple: true
+                  path: binaries
 
-            - name: Create Release and Upload Asset
+            - name: Create Release and upload binaries
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: gh release create "${GITHUB_REF_NAME}" ./cloudsmith.pyz --title "Release v${VERSION}" --notes ""
+              run: gh release create "${GITHUB_REF_NAME}" binaries/* --title "Release v${VERSION}" --notes ""
 
             - name: Install and authenticate Cloudsmith CLI
               uses: cloudsmith-io/cloudsmith-cli-action@159f1619275d5d3147f059c3cc110938ec221d16 # v2.0.3
@@ -86,18 +68,30 @@ jobs:
                   oidc-namespace: ${{ vars.CLOUDSMITH_NAMESPACE }}
                   oidc-service-slug: ${{ vars.CLOUDSMITH_SVC_SLUG }}
 
-            - name: Push Zipapp to Cloudsmith
-              id: push_zipapp
-              run: cloudsmith push raw "${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}" "./cloudsmith.pyz" --name cloudsmith-cli --version "${VERSION}"
+            # Each archive is pushed as its own raw package named after the
+            # target (e.g. cloudsmith-cli-linux-x86_64-musl); the Docker image
+            # build below pulls the musl binaries from here.
+            - name: Push binaries to Cloudsmith
+              run: |
+                  for f in binaries/*.tar.gz binaries/*.zip; do
+                    [ -e "$f" ] || continue
+                    target=$(basename "$f")
+                    target="${target#cloudsmith-${VERSION}-}"
+                    target="${target%.tar.gz}"
+                    target="${target%.zip}"
+                    cloudsmith push raw "${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}" "$f" --name "cloudsmith-cli-${target}" --version "${VERSION}"
+                  done
 
             - name: Build Python packages
-              run: python setup.py sdist bdist_wheel
+              run: |
+                  python -m pip install --upgrade pip build
+                  python -m build
 
             - name: Push source distribution to Cloudsmith
-              run: cloudsmith push python "${CLOUDSMITH_NAMESPACE}/cli" "dist/cloudsmith_cli-${VERSION}.tar.gz"
+              run: cloudsmith push python "${CLOUDSMITH_NAMESPACE}/cli" dist/*.tar.gz
 
             - name: Push wheel to Cloudsmith
-              run: cloudsmith push python "${CLOUDSMITH_NAMESPACE}/cli" "dist/cloudsmith_cli-${VERSION}-py2.py3-none-any.whl"
+              run: cloudsmith push python "${CLOUDSMITH_NAMESPACE}/cli" dist/*.whl
 
             - name: Set up QEMU for multi-arch
               uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
@@ -134,6 +128,7 @@ jobs:
     # Publish Python packages to PyPI
     publish-pypi:
         name: Publish to PyPI
+        needs: binaries
         runs-on: ubuntu-latest
         environment: release
         permissions:
@@ -149,13 +144,10 @@ jobs:
               with:
                   python-version: '3.10'
 
-            - name: Install build dependencies
-              run: |
-                  python -m pip install --upgrade pip
-                  pip install setuptools wheel
-
             - name: Build packages
-              run: python setup.py sdist bdist_wheel
+              run: |
+                  python -m pip install --upgrade pip build
+                  python -m build
 
             - name: Publish to PyPI
               uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

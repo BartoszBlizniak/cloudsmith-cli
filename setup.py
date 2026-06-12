@@ -57,9 +57,9 @@ setup(
         "cloudsmith-api>=2.0.25,<3.0",  # Compatible upto (but excluding) 3.0+
         "keyring>=25.4.1",
         "mcp==1.27.2",
-        # The crypto extra must be declared here: mcp requires pyjwt[crypto],
-        # and a bare PyJWT requirement makes the PEX zipapp resolver drop the
-        # extra (and with it the cryptography wheels).
+        # The crypto extra must be declared here: the OIDC flow verifies JWT
+        # signatures, and a bare PyJWT requirement would let the
+        # standalone-binary build resolve without the cryptography wheels.
         "PyJWT[crypto]>=2.0.0",
         "python-toon==0.1.2",
         "requests>=2.18.4",

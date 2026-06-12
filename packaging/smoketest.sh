@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Smoketest the Cloudsmith single-file binary.
+# Smoketest the standalone Cloudsmith binary.
 #   smoketest.sh <binary> [offline|online]
 # offline: no network, runs in a clean no-Python environment.
 # online:  read-only API checks; needs CLOUDSMITH_API_KEY (+ CLOUDSMITH_NAMESPACE).
@@ -70,7 +70,7 @@ run_offline() {
   for c in $CMDS; do
     "$BIN" "$c" --help >/dev/null 2>&1 || fail "${c} --help failed"
   done
-  echo "swept $(printf '%s\n' $CMDS | wc -l | tr -d ' ') commands"
+  echo "swept $(printf '%s\n' "$CMDS" | wc -l | tr -d ' ') commands"
 
   echo "== whoami (keyring/auth path) =="
   OUT=$( (unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null; "$BIN" whoami 2>&1) || true )

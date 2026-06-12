@@ -1,15 +1,27 @@
 name: binaries
 
+# Builds and clean-room smoketests the standalone CLI binaries. Called from
+# the release workflow on tags (full matrix + online tests), runnable on its
+# own via workflow_dispatch, and run on pull requests that touch the packaging
+# inputs (linux-x86_64-gnu only, offline tests — cheap import-coverage gate).
 on:
   workflow_dispatch:
     inputs:
       online_smoketest:
-        description: Run read-only online smoketest on linux-x86_64-gnu
+        description: Run read-only online smoketests
         type: boolean
         default: true
-  push:
-    tags:
-      - "v*"
+  workflow_call:
+    secrets:
+      CLOUDSMITH_API_KEY:
+        description: Read-only API key for the online smoketests
+        required: false
+  pull_request:
+    paths:
+      - packaging/**
+      - setup.py
+      - requirements.txt
+      - .github/workflows/binaries.yml
 
 permissions:
   contents: read
@@ -25,9 +37,13 @@ jobs:
     outputs:
       include: ${{ steps.gen.outputs.include }}
     steps:
+      # Pull requests build only the cheap baseline target; everything else
+      # (dispatch, release) gets the full matrix.
       - id: gen
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
-          echo "include=$(jq -c . <<'JSON'
+          MATRIX=$(jq -c . <<'JSON'
           {"include":[
             {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","test_runner":"ubuntu-24.04","test_kind":"docker","image":"debian:stable-slim","archive":".tar.gz"},
             {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","test_runner":"ubuntu-24.04","test_kind":"docker","image":"alpine:3.20","archive":".tar.gz"},
@@ -35,10 +51,14 @@ jobs:
             {"name":"linux-aarch64-musl","build_runner":"ubuntu-24.04-arm","mode":"alpine","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"alpine:3.20","archive":".tar.gz"},
             {"name":"macos-arm64","build_runner":"macos-14","mode":"native","test_runner":"macos-14","test_kind":"macos","image":"","archive":".tar.gz"},
             {"name":"macos-x86_64","build_runner":"macos-15-intel","mode":"native","test_runner":"macos-15-intel","test_kind":"macos","image":"","archive":".tar.gz"},
-            {"name":"windows-x86_64","build_runner":"windows-2025","mode":"windows","test_runner":"windows-2025","test_kind":"windows","image":"","archive":".zip"}
+            {"name":"windows-x86_64","build_runner":"windows-2025","mode":"native","test_runner":"windows-2025","test_kind":"windows","image":"","archive":".zip"}
           ]}
           JSON
-          )" >> "$GITHUB_OUTPUT"
+          )
+          if [ "${EVENT}" = "pull_request" ]; then
+            MATRIX=$(printf '%s' "${MATRIX}" | jq -c '{include: [.include[] | select(.name == "linux-x86_64-gnu")]}')
+          fi
+          echo "include=${MATRIX}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: matrix
@@ -51,12 +71,12 @@ jobs:
       PYINSTALLER_VERSION: "6.20.0"
       PYTHON_VERSION: "3.12"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
       - if: matrix.mode != 'alpine'
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -77,7 +97,10 @@ jobs:
           pip install -c packaging/constraints.txt . "pyinstaller==${PYINSTALLER_VERSION}"
           pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
           mkdir -p out
-          tar -czf "out/${ART}" -C dist cloudsmith
+          case "${ART}" in
+            *.zip) (cd dist && 7z a -bso0 "../out/${ART}" cloudsmith) ;;
+            *)     tar -czf "out/${ART}" -C dist cloudsmith ;;
+          esac
 
       - if: matrix.mode == 'alpine'
         env:
@@ -97,18 +120,6 @@ jobs:
               pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
               tar -czf "out/${ART}" -C dist cloudsmith
             '
-
-      - if: matrix.mode == 'windows'
-        shell: bash
-        env:
-          ART: ${{ steps.art.outputs.name }}
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -c packaging/constraints.txt . "pyinstaller==${PYINSTALLER_VERSION}"
-          pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
-          mkdir -p out
-          (cd dist && 7z a -bso0 "../out/${ART}" cloudsmith)
 
       - shell: bash
         env:
@@ -145,7 +156,7 @@ jobs:
       CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
       CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -153,6 +164,18 @@ jobs:
         with:
           name: cloudsmith-${{ matrix.name }}
           path: ./dl
+
+      - name: Verify checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dl
+          ART=$(ls | grep -v '\.sha256$' | head -1)
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c "${ART}.sha256"
+          else
+            shasum -a 256 -c "${ART}.sha256"
+          fi
 
       - if: matrix.test_kind == 'docker'
         env:
@@ -201,7 +224,7 @@ jobs:
   # for the service account, decodes the returned token (exercises pyjwt +
   # cryptography) and calls the API (requests TLS). This is the only test that
   # forces the native auth-crypto path. Requires an OIDC provider configured on
-  # the org trusting this repository for the tf-test-service-cs service account.
+  # the org trusting this repository for the CLOUDSMITH_SERVICE_SLUG account.
   oidc:
     needs: [matrix, build]
     if: ${{ github.event_name == 'push' || inputs.online_smoketest }}
@@ -214,7 +237,7 @@ jobs:
       CLOUDSMITH_ORG: ${{ vars.CLOUDSMITH_NAMESPACE }}
       CLOUDSMITH_SERVICE_SLUG: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
