@@ -1,0 +1,28 @@
+# Build-time constraints for the standalone binary.
+#
+# Pins the dependencies whose breakage would surface ONLY in the frozen binary
+# and only on a version bump: native wheels (cryptography/cffi, pydantic-core,
+# rpds-py) and metadata/dynamic-import-driven packages (mcp, keyring,
+# cloudsmith-api). Bumping any of these is now a deliberate edit gated by the
+# binaries CI matrix, not an uncontrolled fresh resolve at build time.
+#
+# Version-only (no hashes) on purpose: the same file must apply across
+# glibc/musl/macOS/Windows and x86_64/aarch64, whose wheels differ.
+anyio==4.12.1
+certifi==2026.1.4
+cffi==2.0.0
+cloudsmith-api==2.0.27
+cryptography==48.0.0
+httpx==0.28.1
+jsonschema==4.26.0
+keyring==25.7.0
+mcp==1.27.2
+pydantic==2.12.5
+pydantic-core==2.41.5
+pyjwt==2.12.1
+requests==2.34.2
+requests-toolbelt==1.0.0
+rich==14.3.3
+rpds-py==0.30.0
+starlette==1.2.1
+urllib3==2.7.0

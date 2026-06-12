@@ -26,8 +26,30 @@ no_dep_error() {
   fi
 }
 
+# Run a read-only online command; a 429 is the shared org throttling, not a
+# binary failure, so warn and pass.
+online_call() {
+  _label="$1"; shift
+  _out=$("$BIN" "$@" 2>&1) || {
+    if printf '%s' "$_out" | grep -Eq '429|rate limit|Too Many Requests'; then
+      echo "WARN: rate-limited (429) on ${_label}; shared org throttling, not a binary failure" >&2
+      return 0
+    fi
+    printf '%s\n' "$_out"; fail "online ${_label} failed"
+  }
+  no_dep_error "$_out" "$_label"
+  printf '%s\n' "$_out" | head -15
+}
+
 echo "== binary: $BIN (mode=$MODE) =="
 ls -lh "$BIN" 2>/dev/null || true
+
+# Negative test: prove the import/dep detector actually fires, so a real
+# missing-wheel error can never slip past it silently.
+if ( no_dep_error "ModuleNotFoundError: No module named 'sanitycheck'" "gate-selftest" ) 2>/dev/null; then
+  fail "no_dep_error gate did not catch a planted import error (detector broken)"
+fi
+echo "== gate self-test OK (import/dep detector fires) =="
 
 run_offline() {
   echo "== --version =="
@@ -38,6 +60,17 @@ run_offline() {
 
   echo "== mcp --help =="
   "$BIN" mcp --help >/dev/null || fail "mcp --help failed"
+
+  echo "== per-command --help sweep (forces every command module to import) =="
+  # Parse top-level command names from --help (first alias before any '|') and
+  # run --help on each. Catches a command whose module / option construction
+  # pulls an import PyInstaller did not collect.
+  CMDS=$("$BIN" --help 2>/dev/null | awk '/^Commands:/{f=1; next} f && /^[[:space:]]+[a-z]/{print $1}' | cut -d'|' -f1)
+  [ -n "$CMDS" ] || fail "could not parse command list from --help"
+  for c in $CMDS; do
+    "$BIN" "$c" --help >/dev/null 2>&1 || fail "${c} --help failed"
+  done
+  echo "swept $(printf '%s\n' $CMDS | wc -l | tr -d ' ') commands"
 
   echo "== whoami (keyring/auth path) =="
   OUT=$( (unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null; "$BIN" whoami 2>&1) || true )
@@ -65,29 +98,25 @@ run_offline() {
 run_online() {
   [ -n "${CLOUDSMITH_API_KEY:-}" ] || fail "online mode but CLOUDSMITH_API_KEY is empty"
 
-  echo "== whoami (online) =="
-  OUT=$("$BIN" whoami 2>&1) || {
-    if printf '%s' "$OUT" | grep -Eq '429|rate limit|Too Many Requests'; then
-      echo "WARN: rate-limited (429) on whoami; shared org throttling, not a binary failure" >&2
-      return 0
-    fi
-    printf '%s\n' "$OUT"; fail "online whoami failed"
-  }
-  no_dep_error "$OUT" "whoami online"
-  printf '%s\n' "$OUT" | head -15
+  # Auth + cloudsmith_api model deserialization.
+  echo "== whoami (online auth) =="
+  online_call "whoami" whoami
 
+  # Read-only listing — broader cloudsmith_api coverage.
   if [ -n "${CLOUDSMITH_NAMESPACE:-}" ]; then
     echo "== list repos $CLOUDSMITH_NAMESPACE (read-only) =="
-    OUT=$("$BIN" list repos "$CLOUDSMITH_NAMESPACE" 2>&1) || {
-      if printf '%s' "$OUT" | grep -Eq '429|rate limit|Too Many Requests'; then
-        echo "WARN: rate-limited (429); not a binary failure" >&2
-        return 0
-      fi
-      printf '%s\n' "$OUT"; fail "online list repos failed"
-    }
-    no_dep_error "$OUT" "list repos online"
-    printf '%s\n' "$OUT" | head -20
+    online_call "list repos" list repos "$CLOUDSMITH_NAMESPACE"
   fi
+
+  # Fetches the OpenAPI spec over httpx and builds pydantic tool models:
+  # exercises pydantic-core (deeper than the initialize handshake) plus the
+  # native jsonschema/rpds-py validation path and httpx TLS.
+  echo "== mcp list_tools (pydantic-core + jsonschema/rpds-py + httpx TLS) =="
+  online_call "mcp list_tools" mcp list_tools
+
+  # requests/urllib3 + certifi CA bundle + the semver version-compare path.
+  echo "== check service (requests/urllib3/certifi TLS + semver) =="
+  online_call "check service" check service
 }
 
 case "$MODE" in
