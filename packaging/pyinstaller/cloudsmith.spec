@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller onefile spec for the Cloudsmith CLI. Built natively per target.
+# PyInstaller onedir spec for the Cloudsmith CLI. Built natively per target.
+# onedir (not onefile): onefile re-extracts the whole bundle on every
+# invocation (~6s/run); onedir starts in ~0.4s. Distributed as tar.gz/zip.
 
 from PyInstaller.utils.hooks import (
     collect_all,
@@ -41,11 +43,19 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="cloudsmith",
     console=True,
+    strip=False,
+    upx=False,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    name="cloudsmith",
     strip=False,
     upx=False,
 )

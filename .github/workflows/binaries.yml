@@ -29,13 +29,13 @@ jobs:
         run: |
           echo "include=$(jq -c . <<'JSON'
           {"include":[
-            {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","test_runner":"ubuntu-24.04","test_kind":"docker","image":"debian:stable-slim","ext":""},
-            {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","test_runner":"ubuntu-24.04","test_kind":"docker","image":"alpine:3.20","ext":""},
-            {"name":"linux-aarch64-gnu","build_runner":"ubuntu-24.04-arm","mode":"native","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"debian:stable-slim","ext":""},
-            {"name":"linux-aarch64-musl","build_runner":"ubuntu-24.04-arm","mode":"alpine","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"alpine:3.20","ext":""},
-            {"name":"macos-arm64","build_runner":"macos-14","mode":"native","test_runner":"macos-14","test_kind":"macos","image":"","ext":""},
-            {"name":"macos-x86_64","build_runner":"macos-15-intel","mode":"native","test_runner":"macos-15-intel","test_kind":"macos","image":"","ext":""},
-            {"name":"windows-x86_64","build_runner":"windows-2025","mode":"windows","test_runner":"windows-2025","test_kind":"windows","image":"","ext":".exe"}
+            {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","test_runner":"ubuntu-24.04","test_kind":"docker","image":"debian:stable-slim","archive":".tar.gz"},
+            {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","test_runner":"ubuntu-24.04","test_kind":"docker","image":"alpine:3.20","archive":".tar.gz"},
+            {"name":"linux-aarch64-gnu","build_runner":"ubuntu-24.04-arm","mode":"native","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"debian:stable-slim","archive":".tar.gz"},
+            {"name":"linux-aarch64-musl","build_runner":"ubuntu-24.04-arm","mode":"alpine","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"alpine:3.20","archive":".tar.gz"},
+            {"name":"macos-arm64","build_runner":"macos-14","mode":"native","test_runner":"macos-14","test_kind":"macos","image":"","archive":".tar.gz"},
+            {"name":"macos-x86_64","build_runner":"macos-15-intel","mode":"native","test_runner":"macos-15-intel","test_kind":"macos","image":"","archive":".tar.gz"},
+            {"name":"windows-x86_64","build_runner":"windows-2025","mode":"windows","test_runner":"windows-2025","test_kind":"windows","image":"","archive":".zip"}
           ]}
           JSON
           )" >> "$GITHUB_OUTPUT"
@@ -64,8 +64,8 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.name }}
-          EXT: ${{ matrix.ext }}
-        run: echo "name=cloudsmith-$(cat cloudsmith_cli/data/VERSION)-${TARGET}${EXT}" >> "$GITHUB_OUTPUT"
+          ARCHIVE: ${{ matrix.archive }}
+        run: echo "name=cloudsmith-$(cat cloudsmith_cli/data/VERSION)-${TARGET}${ARCHIVE}" >> "$GITHUB_OUTPUT"
 
       - if: matrix.mode == 'native'
         shell: bash
@@ -77,7 +77,7 @@ jobs:
           pip install . "pyinstaller==${PYINSTALLER_VERSION}"
           pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
           mkdir -p out
-          mv dist/cloudsmith "out/${ART}"
+          tar -czf "out/${ART}" -C dist cloudsmith
 
       - if: matrix.mode == 'alpine'
         env:
@@ -95,7 +95,7 @@ jobs:
               python -m pip install --root-user-action=ignore --upgrade pip >/dev/null
               pip install --root-user-action=ignore . "pyinstaller==${PYINSTALLER_VERSION}" >/dev/null
               pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
-              mv dist/cloudsmith "out/${ART}"
+              tar -czf "out/${ART}" -C dist cloudsmith
             '
 
       - if: matrix.mode == 'windows'
@@ -108,7 +108,7 @@ jobs:
           pip install . "pyinstaller==${PYINSTALLER_VERSION}"
           pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
           mkdir -p out
-          mv dist/cloudsmith.exe "out/${ART}"
+          (cd dist && 7z a -bso0 "../out/${ART}" cloudsmith)
 
       - shell: bash
         env:
@@ -151,28 +151,29 @@ jobs:
           IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
-          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
-          chmod +x "dl/${BIN}"
-          docker run --rm -e BIN="${BIN}" -v "${PWD}:/w" -w /w "${IMAGE}" sh -c '
+          ART=$(ls dl | grep -v '\.sha256$' | head -1)
+          tar -xzf "dl/${ART}" -C .
+          docker run --rm -v "${PWD}:/w" -w /w "${IMAGE}" sh -c '
             if command -v python3 >/dev/null 2>&1; then echo "python3 present on host"; exit 1; fi
-            sh packaging/smoketest.sh "dl/${BIN}" offline
+            sh packaging/smoketest.sh cloudsmith/cloudsmith offline
           '
 
       - if: matrix.test_kind == 'macos'
         run: |
           set -euo pipefail
-          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
-          chmod +x "dl/${BIN}"
-          codesign -s - -f "dl/${BIN}" || true
-          env -i HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" "${PWD}/dl/${BIN}" --version
-          sh packaging/smoketest.sh "dl/${BIN}" offline
+          ART=$(ls dl | grep -v '\.sha256$' | head -1)
+          tar -xzf "dl/${ART}" -C .
+          codesign -s - -f cloudsmith/cloudsmith || true
+          env -i HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" "${PWD}/cloudsmith/cloudsmith" --version
+          sh packaging/smoketest.sh cloudsmith/cloudsmith offline
 
       - if: matrix.test_kind == 'windows'
         shell: bash
         run: |
           set -euo pipefail
-          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
-          sh packaging/smoketest.sh "dl/${BIN}" offline
+          ART=$(ls dl | grep -v '\.sha256$' | head -1)
+          7z x -bso0 "dl/${ART}" -o.
+          sh packaging/smoketest.sh cloudsmith/cloudsmith.exe offline
 
       - name: Online read-only smoketest
         if: ${{ matrix.name == 'linux-x86_64-gnu' && (github.event_name == 'push' || inputs.online_smoketest) }}
@@ -182,6 +183,4 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${CLOUDSMITH_API_KEY:-}" ] || { echo "CLOUDSMITH_API_KEY unset; skipping online smoketest"; exit 0; }
-          BIN=$(ls dl | grep -v '\.sha256$' | head -1)
-          chmod +x "dl/${BIN}"
-          sh packaging/smoketest.sh "dl/${BIN}" online
+          sh packaging/smoketest.sh cloudsmith/cloudsmith online
