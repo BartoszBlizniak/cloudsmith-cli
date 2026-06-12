@@ -1,3 +1,4 @@
+# Copyright 2026 Cloudsmith Ltd
 """
 Helper for discovering Cloudsmith custom domains.
 
@@ -8,17 +9,31 @@ for use in credential helpers. Results are cached on the filesystem.
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
-
-import requests
+from typing import Literal
 
 from ..cli.config import get_default_config_path
+from ..core.api.exceptions import ApiException
+from ..core.api.init import initialise_api
+from ..core.api.orgs import list_custom_domains
 from ..core.cache_utils import atomic_write_json
+from ..core.credentials.models import CredentialResult
 
 logger = logging.getLogger(__name__)
 
 # Cache custom domains for 1 hour
 CACHE_TTL_SECONDS = 3600
+
+
+@dataclass(frozen=True)
+class CustomDomain:
+    """A structured Cloudsmith custom domain record."""
+
+    host: str
+    backend_kind: int | None
+    enabled: bool
+    validated: bool
 
 
 def get_cache_dir() -> Path:
@@ -66,7 +81,7 @@ def is_cache_valid(cache_path: Path) -> bool:
         return False
 
 
-def read_cache(cache_path: Path) -> list[str] | None:
+def read_cache(cache_path: Path) -> list[CustomDomain] | None:
     """
     Read custom domains from cache file.
 
@@ -74,7 +89,7 @@ def read_cache(cache_path: Path) -> list[str] | None:
         cache_path: Path to cache file
 
     Returns:
-        List of domain strings or None if cache invalid/missing
+        List of CustomDomain records or None if cache invalid/missing
     """
     if not is_cache_valid(cache_path):
         return None
@@ -85,20 +100,48 @@ def read_cache(cache_path: Path) -> list[str] | None:
             if isinstance(data, dict) and "domains" in data:
                 domains = data["domains"]
                 if isinstance(domains, list):
+                    # Detect legacy format: non-empty list of strings (old build stored
+                    # domains as plain strings, not dicts). Treat as a cache miss so the
+                    # caller re-fetches and rewrites in the current dict format.
+                    if domains and not any(isinstance(d, dict) for d in domains):
+                        logger.debug(
+                            "Stale string-format cache detected at %s, treating as miss",
+                            cache_path,
+                        )
+                        return None
+
+                    records = [
+                        CustomDomain(
+                            host=d["host"],
+                            backend_kind=d.get("backend_kind"),
+                            enabled=bool(d.get("enabled", False)),
+                            validated=bool(d.get("validated", False)),
+                        )
+                        for d in domains
+                        if isinstance(d, dict) and d.get("host")
+                    ]
                     logger.debug(
-                        "Read %d domains from cache: %s", len(domains), cache_path
+                        "Read %d domains from cache: %s", len(records), cache_path
                     )
-                    return domains
+                    return records
     except (OSError, json.JSONDecodeError) as exc:
         logger.debug("Failed to read cache %s: %s", cache_path, exc)
 
     return None
 
 
-def write_cache(cache_path: Path, domains: list[str]) -> None:
+def write_cache(cache_path: Path, domains: list[CustomDomain]) -> None:
     """Write custom domains to cache file."""
     data = {
-        "domains": domains,
+        "domains": [
+            {
+                "host": d.host,
+                "backend_kind": d.backend_kind,
+                "enabled": d.enabled,
+                "validated": d.validated,
+            }
+            for d in domains
+        ],
         "cached_at": time.time(),
     }
     try:
@@ -108,13 +151,14 @@ def write_cache(cache_path: Path, domains: list[str]) -> None:
         logger.debug("Failed to write cache %s: %s", cache_path, exc)
 
 
-def get_custom_domains_for_org(  # pylint: disable=too-many-return-statements
+def get_custom_domains(  # pylint: disable=too-many-return-statements
     org: str,
-    session=None,
+    *,
     api_key: str | None = None,
     auth_type: str = "api_key",
     api_host: str | None = None,
-) -> list[str]:
+    refresh: bool = False,
+) -> list[CustomDomain]:
     """
     Fetch custom domains for a Cloudsmith organization.
 
@@ -122,77 +166,116 @@ def get_custom_domains_for_org(  # pylint: disable=too-many-return-statements
 
     Args:
         org: Organization slug
-        session: Pre-configured requests.Session with proxy/SSL settings.
-            If None, a plain requests session is used.
         api_key: Optional API key/token for authentication
         auth_type: "api_key" (uses X-Api-Key header) or "bearer" (uses Authorization: Bearer)
-        api_host: Cloudsmith API host URL. Defaults to https://api.cloudsmith.io.
+        api_host: Cloudsmith API host URL (including version). Taken from the SDK
+            configuration default when not provided.
+        refresh: When ``True``, skip the cache read and always fetch from the API.
+            The fresh result is still written to the cache.
 
     Returns:
-        List of custom domain strings (e.g., ['docker.customer.com', 'dl.customer.com'])
-        Empty list if API call fails or org has no custom domains
+        List of CustomDomain records.
+        Empty list if API call fails or org has no custom domains.
+
+    Note:
+        Only ``ApiException`` is handled here (per-status). Network-layer errors
+        (DNS/timeout/SSL/urllib3) are intentionally NOT caught — they propagate to
+        the caller. The credential-helper protocol boundary (the click command) and
+        the installer are responsible for catching broadly and refusing gracefully,
+        so the library stays free of bare ``except Exception`` (reviewer feedback).
     """
     cache_path = get_cache_path(org)
-    cached_domains = read_cache(cache_path)
-    if cached_domains is not None:
+    cached = None if refresh else read_cache(cache_path)
+    if cached is not None:
         logger.debug("Using cached custom domains for %s", org)
-        return cached_domains
+        return cached
 
     logger.debug("Fetching custom domains from API for %s", org)
 
+    normalized_auth_type: Literal["api_key", "bearer"] = (
+        "bearer" if auth_type == "bearer" else "api_key"
+    )
+    credential = (
+        CredentialResult(
+            api_key=api_key,
+            source_name="credential-helper",
+            auth_type=normalized_auth_type,
+        )
+        if api_key
+        else None
+    )
+    initialise_api(host=api_host, credential=credential)
+
     try:
-        if session is None:
-            session = requests.Session()
-
-        headers = {}
-        if api_key:
-            if auth_type == "bearer":
-                headers["Authorization"] = f"Bearer {api_key}"
-            else:
-                headers["X-Api-Key"] = api_key
-
-        host = api_host or "https://api.cloudsmith.io"
-        url = f"{host}/orgs/{org}/custom-domains/"
-
-        response = session.get(url, headers=headers, timeout=10)
-
-        if response.status_code in (401, 403):
+        raw_domains = list_custom_domains(org)
+    except ApiException as exc:
+        if exc.status in (401, 403):
+            # Don't cache auth failures - might work later once authenticated.
             logger.debug(
                 "Custom domains API requires auth - assuming no custom domains for %s",
                 org,
             )
-            return []  # Don't cache 401/403 - might work later with auth
+            return []
 
-        if response.status_code == 404:
+        if exc.status == 404:
+            # Cache empty result to avoid repeated lookups for a missing org.
             logger.debug("Organization %s not found or has no custom domains", org)
-            write_cache(cache_path, [])  # Cache empty result to avoid repeated 404s
+            write_cache(cache_path, [])
             return []
 
-        if response.status_code != 200:
-            logger.debug(
-                "Failed to fetch custom domains for %s: HTTP %d",
-                org,
-                response.status_code,
-            )
+        if exc.status == 402:
+            # Custom domains product feature not enabled - treat as none.
+            logger.debug("Custom domains not enabled for %s", org)
+            write_cache(cache_path, [])
             return []
 
-        data = response.json()
-
-        # Expected format: [{"host": "docker.customer.com", ...}, ...]
-        domains = []
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    host = item.get("host")
-                    if isinstance(host, str) and host:
-                        domains.append(host)
-
-        logger.debug("Fetched %d custom domains for %s", len(domains), org)
-
-        write_cache(cache_path, domains)
-
-        return domains
-
-    except (requests.RequestException, ValueError) as exc:
-        logger.debug("Error fetching custom domains: %s", exc)
+        logger.debug("Failed to fetch custom domains for %s: HTTP %s", org, exc.status)
         return []
+
+    records = [
+        CustomDomain(
+            host=d["host"],
+            backend_kind=d.get("backend_kind"),
+            enabled=bool(d.get("enabled", False)),
+            validated=bool(d.get("validated", False)),
+        )
+        for d in raw_domains
+        if d.get("host")
+    ]
+
+    logger.debug("Fetched %d custom domains for %s", len(records), org)
+    write_cache(cache_path, records)
+    return records
+
+
+def get_format_domains(
+    org: str,
+    backend_kind: int,
+    *,
+    api_key: str | None = None,
+    auth_type: str = "api_key",
+    api_host: str | None = None,
+    refresh: bool = False,
+) -> list[str]:
+    """
+    Return enabled and validated custom domain hostnames for a specific backend format.
+
+    Args:
+        org: Organization slug
+        backend_kind: BackendKind int value (e.g. BackendKind.DOCKER == 6)
+        api_key: Optional API key/token for authentication
+        auth_type: "api_key" or "bearer"
+        api_host: Cloudsmith API host URL
+        refresh: When ``True``, bypass the cache and fetch fresh data from the API.
+
+    Returns:
+        List of hostnames that are enabled, validated, and match the given backend_kind.
+    """
+    domains = get_custom_domains(
+        org, api_key=api_key, auth_type=auth_type, api_host=api_host, refresh=refresh
+    )
+    return [
+        d.host
+        for d in domains
+        if d.backend_kind == int(backend_kind) and d.enabled and d.validated
+    ]

@@ -5,8 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-
 ## [Unreleased]
+
+## [1.19.0] - 2026-06-11
+
+### Added
+
+- Added a Docker credential helper for Cloudsmith registries. `cloudsmith credential-helper install docker` installs a `docker-credential-cloudsmith` launcher binary and registers it in `~/.docker/config.json`, so Docker authenticates to Cloudsmith registries automatically using your existing CLI credentials — no manual `docker login` required. Custom Cloudsmith registry domains are discovered via the API and cached locally; add extra hostnames with `--domain` (repeatable), disable discovery with `--no-discover`, or preview changes with `--dry-run`. Manage installed helpers with `cloudsmith credential-helper uninstall docker` and `cloudsmith credential-helper list`.
+- Added Bitbucket Pipelines to OIDC credential auto-discovery. When a pipeline step sets `oidc: true`, the CLI reads the OIDC token from the `BITBUCKET_STEP_OIDC_TOKEN` environment variable and exchanges it for a Cloudsmith access token. Works out of the box with no extra dependencies.
+- Added CircleCI to OIDC credential auto-discovery. When running in CircleCI, the CLI reads the OIDC token from the `CIRCLE_OIDC_TOKEN_V2` (preferred) or `CIRCLE_OIDC_TOKEN` environment variable and exchanges it for a Cloudsmith access token. Works out of the box with no extra dependencies.
+- Added Azure DevOps to OIDC credential auto-discovery. When running in an Azure DevOps pipeline, the CLI fetches an OIDC token from the `SYSTEM_OIDCREQUESTURI` endpoint using the pipeline's `SYSTEM_ACCESSTOKEN` and exchanges it for a Cloudsmith access token. Works out of the box with no extra dependencies.
+- Added GitHub Actions to OIDC credential auto-discovery. When running in GitHub Actions (with `id-token: write` permission), the CLI fetches an OIDC token from the Actions runtime endpoint and exchanges it for a Cloudsmith access token. Works out of the box with no extra dependencies.
+- Added a generic fallback to OIDC credential auto-discovery. When no dedicated environment is detected, the CLI reads an OIDC token from the `CLOUDSMITH_OIDC_TOKEN` environment variable (useful for Jenkins or any custom CI/CD) and exchanges it for a Cloudsmith access token. Works out of the box with no extra dependencies.
+- Added GitLab CI to OIDC credential auto-discovery. When running in GitLab CI/CD, the CLI reads the OIDC token from the `CLOUDSMITH_OIDC_TOKEN` environment variable (configured via `id_tokens` in `.gitlab-ci.yml`) and exchanges it for a Cloudsmith access token. Works out of the box with no extra dependencies.
+- Added controls for OIDC detector selection. Set `CLOUDSMITH_OIDC_<DETECTOR>_DISABLED=true` to skip a specific detector (only the literal `true` disables), or use `--oidc-detector-order` (env var `CLOUDSMITH_OIDC_DETECTOR_ORDER`) with a comma-separated list of detector ids to override which detectors are considered and the order they are tried in. When both are set, disable flags take precedence over the order list. Both controls can also be set in `config.ini` via the `oidc_detector_order` and `oidc_disabled_detectors` keys (the latter additive with the `*_DISABLED` env vars). Unknown ids in the order, or controls that leave no detector enabled, are surfaced as a warning. Detector ids: `aws`, `azure_devops`, `bitbucket`, `circleci`, `generic`, `github`, `gitlab`.
+
+### Fixed
+
+- The official Docker image now runs as a dedicated non-root `cloudsmith` user (uid 1000) instead of root.
+- The PyJWT dependency now declares the `crypto` extra (`PyJWT[crypto]`), fixing zipapp (`.pyz`) builds that previously shipped without cryptography wheels and failed at startup on macOS.
+
+### Security
+
+- Upgraded vulnerable dependencies — `mcp` 1.9.1 → 1.27.2 plus transitive upgrades (`urllib3`, `requests`, `starlette`, `python-multipart`, `python-dotenv`, `idna`, `pygments`, `pytest`) — resolving all open Dependabot alerts.
+
+
+## [1.18.0] - 2026-06-09
+
+### Added
+
+- OIDC credential auto-discovery for CI/CD. When `CLOUDSMITH_ORG` and `CLOUDSMITH_SERVICE_SLUG` are set, the CLI auto-detects a supported cloud environment, obtains a vendor OIDC token, and exchanges it for a short-lived Cloudsmith API token — no static API key required. Initial support is for AWS (install the extra with `pip install cloudsmith-cli[aws]`). Tunable via `--oidc-org`, `--oidc-service-slug`, `--oidc-audience`, and `--oidc-discovery-disabled` (and matching `CLOUDSMITH_OIDC_*` env vars). The detector skips itself silently when its dependencies are not installed.
+- `cloudsmith mcp configure` now supports Claude Code as a client (`--client claude-code`), registering the Cloudsmith MCP server in `~/.claude.json`.
+
+### Changed
+
+- Authentication now resolves credentials through an explicit, predictable provider chain: CLI flag → environment variable → credentials file → keyring → OIDC. This separates the previously combined credential sources and makes precedence deterministic.
+
+### Fixed
+
+- `metadata list` filters (`--source-kind`, `--classification`) now send the enum name the v2 API expects instead of an integer, fixing an HTTP 400 on every filtered list. Valid source kinds: `unknown, system, upstream, custom, third_party`; classifications: `unknown, intrinsic, security, provenance, sbom, generic`.
 
 ## [1.17.0] - 2026-05-18
 

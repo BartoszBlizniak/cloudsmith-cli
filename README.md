@@ -165,6 +165,71 @@ pip install cloudsmith-cli[all]
 
 **Note:** If you don't install the AWS extra, the AWS OIDC detector will gracefully skip itself with no errors.
 
+#### Bitbucket Pipelines OIDC Support
+
+In Bitbucket Pipelines, OIDC credential discovery works out of the box with no extra dependencies. Set `oidc: true` on the pipeline step and the CLI reads the token from the `BITBUCKET_STEP_OIDC_TOKEN` variable that Bitbucket populates. The Cloudsmith OIDC provider must expect the workspace audience that Bitbucket mints (`ari:cloud:bitbucket::workspace/<workspace-uuid>`):
+
+```yaml
+pipelines:
+  default:
+    - step:
+        oidc: true
+        script:
+          - cloudsmith push ...
+```
+
+See the [Bitbucket Pipelines OIDC documentation](https://support.atlassian.com/bitbucket-cloud/docs/integrate-pipelines-with-resource-servers-using-oidc/).
+
+#### CircleCI OIDC Support
+
+In CircleCI, OIDC credential discovery works out of the box with no extra dependencies — the CLI reads the token from the `CIRCLE_OIDC_TOKEN_V2` (preferred) or `CIRCLE_OIDC_TOKEN` environment variable that CircleCI injects into every job. The Cloudsmith OIDC provider must expect the audience CircleCI mints, which is your CircleCI organization UUID. See the [Cloudsmith CircleCI integration guide](https://docs.cloudsmith.com/integrations/integrating-with-circleci).
+
+#### Azure DevOps OIDC Support
+
+In Azure DevOps Pipelines, OIDC credential discovery works out of the box with no extra dependencies — the CLI fetches an OIDC token from the `SYSTEM_OIDCREQUESTURI` endpoint using the pipeline's `SYSTEM_ACCESSTOKEN`. Make sure `SYSTEM_ACCESSTOKEN` is mapped into the step's environment. The Cloudsmith OIDC provider must expect the audience `api://AzureADTokenExchange`, which Azure DevOps always mints (any requested audience is ignored). See the [Cloudsmith Azure DevOps integration guide](https://docs.cloudsmith.com/integrations/integrating-with-azure-devops).
+
+#### GitHub Actions OIDC Support
+
+In GitHub Actions, OIDC credential discovery works out of the box with no extra dependencies — the CLI fetches an OIDC token from the Actions runtime when the workflow requests `id-token: write` permission. See the [Cloudsmith GitHub Actions OIDC guide](https://docs.cloudsmith.com/authentication/setup-cloudsmith-to-authenticate-with-oidc-in-github-actions).
+
+#### GitLab CI OIDC Support
+
+In GitLab CI/CD, OIDC credential discovery works out of the box with no extra dependencies. Configure an [`id_tokens`](https://docs.gitlab.com/ci/cloud_services/) entry in your `.gitlab-ci.yml` with an `aud` of `https://api.cloudsmith.io/openid/<your-org>` and expose it as `CLOUDSMITH_OIDC_TOKEN`, and the CLI will pick it up automatically:
+
+```yaml
+job:
+  id_tokens:
+    CLOUDSMITH_OIDC_TOKEN:
+      aud: https://api.cloudsmith.io/openid/<your-org>
+  script:
+    - cloudsmith push ...
+```
+
+See the [Cloudsmith GitLab CI/CD integration guide](https://docs.cloudsmith.com/integrations/integrating-with-gitlab-cicd).
+
+#### Generic OIDC Support (Jenkins, custom CI/CD)
+
+As a fallback for environments without a dedicated detector (for example Jenkins with the [credentials binding plugin](https://plugins.jenkins.io/credentials-binding/), or any custom CI/CD system), set the `CLOUDSMITH_OIDC_TOKEN` environment variable to an OIDC JWT and the CLI will exchange it for a Cloudsmith access token. This detector runs last, so a dedicated environment is always preferred when present. See the [Cloudsmith Jenkins OIDC guide](https://docs.cloudsmith.com/authentication/setup-jenkins-to-authenticate-to-cloudsmith-using-oidc).
+
+#### Controlling OIDC Detector Selection
+
+By default the CLI tries each detector in a fixed priority order and uses the first that matches. Two controls let you override this when a detector matches an environment you don't want it to (for example, the AWS detector matching ambient instance credentials):
+
+- **Disable a detector** — set `CLOUDSMITH_OIDC_<DETECTOR>_DISABLED=true` to skip it entirely. Only the literal value `true` (case-insensitive) disables; anything else leaves the detector enabled. For example, `CLOUDSMITH_OIDC_AWS_DISABLED=true` skips the AWS detector so an explicitly-set `CLOUDSMITH_OIDC_TOKEN` is picked up by the generic detector instead.
+- **Reorder evaluation** — use `--oidc-detector-order` (or the `CLOUDSMITH_OIDC_DETECTOR_ORDER` environment variable) with a comma-separated list of detector ids to control both which detectors are considered and the order they are tried in (first match wins). Ids not listed are skipped; unrecognised ids are ignored with a warning. For example, `--oidc-detector-order=generic,aws` tries the generic detector first and considers only those two.
+
+When both are set, the order list defines the candidate set and sequence, then the `*_DISABLED` flags are applied on top — so a disabled detector is always skipped even if it appears in the order list. Detector ids are: `aws`, `azure_devops`, `bitbucket`, `circleci`, `generic`, `github`, `gitlab`.
+
+Both controls can also be set in `config.ini`, under `[default]` or a profile section:
+
+```ini
+[default]
+oidc_detector_order = github, aws
+oidc_disabled_detectors = aws, gitlab
+```
+
+The `--oidc-detector-order` flag (or the `CLOUDSMITH_OIDC_DETECTOR_ORDER` environment variable) overrides the `oidc_detector_order` config value. The `oidc_disabled_detectors` config key is additive with the per-detector `CLOUDSMITH_OIDC_<DETECTOR>_DISABLED` environment variables — a detector disabled by either is skipped.
+
 ## Configuration
 
 There are two configuration files used by the CLI:
