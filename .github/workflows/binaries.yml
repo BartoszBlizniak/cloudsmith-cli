@@ -19,8 +19,8 @@ on:
   pull_request:
     paths:
       - packaging/**
-      - setup.py
-      - requirements.txt
+      - pyproject.toml
+      - uv.lock
       - .github/workflows/binaries.yml
 
 permissions:
