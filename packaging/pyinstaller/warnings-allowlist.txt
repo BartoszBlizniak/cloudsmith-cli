@@ -182,3 +182,27 @@ wsproto.extensions
 wsproto.utilities
 yaml
 zstandard
+
+# Windows-only: Py2 legacy shims, POSIX-only modules absent on Windows,
+# optional codegen tables, and pywin32-ctypes backend-dispatch internals.
+# The shipped binary builds and passes the offline smoketest on Windows; the
+# keyring Windows backend (win32ctypes) is not exercised by the smoketest
+# (it forces the null backend) — validate it manually.
+_dummy_thread
+_posixshmem
+cStringIO
+cffi._pycparser
+collections.Callable
+dummy_thread
+imp
+pycparser.lextab
+pycparser.yacctab
+readline
+setuptools._distutils.msvc9compiler
+thread
+win32ctypes.core._authentication
+win32ctypes.core._common
+win32ctypes.core._dll
+win32ctypes.core._resource
+win32ctypes.core._system_information
+win32ctypes.core._time
