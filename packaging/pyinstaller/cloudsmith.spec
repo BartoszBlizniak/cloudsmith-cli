@@ -4,7 +4,6 @@
 # invocation (~6s/run); onedir starts in ~0.4s. Distributed as tar.gz/zip.
 
 from PyInstaller.utils.hooks import (
-    collect_all,
     collect_data_files,
     collect_submodules,
     copy_metadata,
@@ -12,22 +11,23 @@ from PyInstaller.utils.hooks import (
 
 datas, binaries, hiddenimports = [], [], []
 
-d, b, h = collect_all("cloudsmith_cli")
-datas += d
-binaries += b
-hiddenimports += h
+datas += collect_data_files(
+    "cloudsmith_cli",
+    includes=["data/*", "templates/*"],
+)
+datas += collect_data_files("mcp", includes=["py.typed"])
 
-hiddenimports += collect_submodules("cloudsmith_api")
-# mcp.cli imports the optional `typer` dependency; exclude it.
-hiddenimports += collect_submodules("mcp", filter=lambda n: not n.startswith("mcp.cli"))
-datas += collect_data_files("mcp")
+# mcp.cli imports the optional `typer` dependency. Keep mcp.client and exclude
+# only the CLI package itself and its descendants.
+hiddenimports += collect_submodules(
+    "mcp",
+    filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
+)
 hiddenimports += collect_submodules("keyring.backends")
+hiddenimports += ["boto3", "botocore.exceptions"]
 
 for dist in ("cloudsmith-cli", "cloudsmith-api", "mcp", "keyring"):
-    try:
-        datas += copy_metadata(dist)
-    except Exception:
-        pass
+    datas += copy_metadata(dist)
 
 a = Analysis(
     ["entry.py"],
@@ -35,7 +35,16 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["tkinter", "pytest", "pylint", "black", "isort"],
+    excludes=[
+        "tkinter",
+        "pytest",
+        "pylint",
+        "black",
+        "isort",
+        "mcp.cli",
+        "cloudsmith_cli.cli.tests",
+        "cloudsmith_cli.core.tests",
+    ],
 )
 
 pyz = PYZ(a.pure)

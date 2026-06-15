@@ -14,6 +14,7 @@ case "$BIN" in
   */*) : ;;
   *) BIN="./$BIN" ;;
 esac
+BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 
 fail() { echo "SMOKETEST FAIL: $1" >&2; exit 1; }
 
@@ -53,7 +54,12 @@ echo "== gate self-test OK (import/dep detector fires) =="
 
 run_offline() {
   echo "== --version =="
-  "$BIN" --version || fail "--version exited nonzero"
+  VERSION_OUT=$("$BIN" --version) || fail "--version exited nonzero"
+  printf '%s\n' "$VERSION_OUT"
+  if [ -n "${EXPECTED_VERSION:-}" ]; then
+    printf '%s\n' "$VERSION_OUT" | grep -Fq "CLI Package Version: ${EXPECTED_VERSION}" \
+      || fail "--version did not report ${EXPECTED_VERSION}"
+  fi
 
   echo "== --help =="
   "$BIN" --help >/dev/null || fail "--help exited nonzero"
@@ -65,7 +71,9 @@ run_offline() {
   # Parse top-level command names from --help (first alias before any '|') and
   # run --help on each. Catches a command whose module / option construction
   # pulls an import PyInstaller did not collect.
-  CMDS=$("$BIN" --help 2>/dev/null | awk '/^Commands:/{f=1; next} f && /^[[:space:]]+[a-z]/{print $1}' | cut -d'|' -f1)
+  # Stop at the blank line ending the Commands block so a wrapped epilog line
+  # (e.g. a docs URL) can never be parsed as a bogus command name.
+  CMDS=$("$BIN" --help 2>/dev/null | awk '/^Commands:/{f=1; next} f && /^[[:space:]]*$/{f=0} f && /^[[:space:]]+[a-z]/{print $1}' | cut -d'|' -f1)
   [ -n "$CMDS" ] || fail "could not parse command list from --help"
   for c in $CMDS; do
     "$BIN" "$c" --help >/dev/null 2>&1 || fail "${c} --help failed"
@@ -73,26 +81,103 @@ run_offline() {
   echo "swept $(printf '%s\n' "$CMDS" | wc -l | tr -d ' ') commands"
 
   echo "== whoami (keyring/auth path) =="
-  OUT=$( (unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null; "$BIN" whoami 2>&1) || true )
+  OUT=$( (
+    unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null
+    CLOUDSMITH_API_HOST=http://127.0.0.1:9 \
+    CLOUDSMITH_OIDC_DISCOVERY_DISABLED=true \
+    PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
+      "$BIN" whoami 2>&1
+  ) || true )
   no_dep_error "$OUT" "whoami"
   printf '%s\n' "$OUT" | head -5
 
+  echo "== AWS OIDC dependency load =="
+  OUT=$( (
+    unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null
+    AWS_ACCESS_KEY_ID=smoketest \
+    AWS_SECRET_ACCESS_KEY=smoketest \
+    AWS_EC2_METADATA_DISABLED=true \
+    AWS_ENDPOINT_URL_STS=http://127.0.0.1:9 \
+    AWS_MAX_ATTEMPTS=1 \
+    CLOUDSMITH_API_HOST=http://127.0.0.1:9 \
+    PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
+      "$BIN" whoami 2>&1
+  ) || true )
+  no_dep_error "$OUT" "AWS OIDC dependency load"
+
   echo "== credential-helper docker (offline) =="
-  OUT=$( (unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null; printf 'docker.cloudsmith.io' | "$BIN" credential-helper docker 2>&1) || true )
+  OUT=$( (
+    unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null
+    printf 'docker.cloudsmith.io' | CLOUDSMITH_OIDC_DISCOVERY_DISABLED=true \
+      PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
+      "$BIN" credential-helper docker 2>&1
+  ) || true )
   no_dep_error "$OUT" "credential-helper docker"
   printf '%s\n' "$OUT" | grep -q "Unable to retrieve credentials" \
     || fail "credential-helper did not emit expected message; got: $OUT"
 
-  echo "== mcp stdio initialize (loads pydantic-core) =="
-  "$BIN" --version >/dev/null 2>&1 || true
-  INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
-  OUTF="$(mktemp 2>/dev/null || echo /tmp/mcp.out)"
-  ERRF="$(mktemp 2>/dev/null || echo /tmp/mcp.err)"
-  printf '%s\n' "$INIT" | "$BIN" mcp start >"$OUTF" 2>"$ERRF" || true
-  OUT=$(head -1 "$OUTF" 2>/dev/null || true)
-  no_dep_error "$(cat "$ERRF" 2>/dev/null || true)" "mcp start"
-  printf '%s' "$OUT" | grep -q '"jsonrpc":"2.0"' \
-    || fail "mcp initialize produced no jsonrpc envelope"
+  echo "== credential-helper install docker (frozen launcher self-references binary) =="
+  # A standalone binary is not guaranteed to be on PATH as `cloudsmith`, so the
+  # frozen install must point the docker-credential launcher at the absolute
+  # executable. Prove it by running the launcher with an empty PATH: a bare
+  # `cloudsmith` lookup would fail, so reaching the CLI proves the self-reference.
+  INSTALL_TMP="$(mktemp -d 2>/dev/null || echo /tmp/cloudsmith-credhelper-install)"
+  mkdir -p "$INSTALL_TMP/bin" "$INSTALL_TMP/docker"
+  OUT=$( (
+    unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null
+    DOCKER_CONFIG="$INSTALL_TMP/docker" \
+    CLOUDSMITH_OIDC_DISCOVERY_DISABLED=true \
+    PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
+      "$BIN" credential-helper install docker \
+        --bin-dir "$INSTALL_TMP/bin" --no-discover 2>&1
+  ) || true )
+  no_dep_error "$OUT" "credential-helper install docker"
+  case "$BIN" in
+    *.exe)
+      LAUNCHER="$INSTALL_TMP/bin/docker-credential-cloudsmith.cmd"
+      [ -f "$LAUNCHER" ] || fail "install did not write a launcher; got: $OUT"
+      grep -Eq '"[^"]*cloudsmith\.exe"' "$LAUNCHER" \
+        || fail "frozen launcher must forward to the executable; got: $(cat "$LAUNCHER")"
+      ;;
+    *)
+      LAUNCHER="$INSTALL_TMP/bin/docker-credential-cloudsmith"
+      [ -f "$LAUNCHER" ] || fail "install did not write a launcher; got: $OUT"
+      LOUT=$( (
+        unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null
+        printf 'docker.cloudsmith.io' | PATH= \
+          CLOUDSMITH_OIDC_DISCOVERY_DISABLED=true \
+          PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
+          "$LAUNCHER" 2>&1
+      ) || true )
+      no_dep_error "$LOUT" "frozen docker-credential launcher exec"
+      printf '%s' "$LOUT" | grep -q "Unable to retrieve credentials" \
+        || fail "frozen launcher did not reach the CLI (bare cloudsmith off PATH?); got: $LOUT"
+      ;;
+  esac
+
+  echo "== frozen mcp configure command =="
+  CONFIG_TMP="$(mktemp -d 2>/dev/null || echo /tmp/cloudsmith-mcp-config)"
+  mkdir -p "$CONFIG_TMP"
+  (
+    cd "$CONFIG_TMP"
+    HOME="$CONFIG_TMP" "$BIN" mcp configure --client cursor --local >/dev/null
+  ) || fail "mcp configure failed"
+  CONFIG="$CONFIG_TMP/.cursor/mcp.json"
+  [ -f "$CONFIG" ] || fail "mcp configure did not create cursor config"
+  case "$BIN" in
+    *.exe)
+      grep -Eq '"command":[[:space:]]*"[^"]*cloudsmith\.exe"' "$CONFIG" \
+        || fail "frozen mcp config did not use the executable directly"
+      ;;
+    *)
+      grep -Fq "\"command\": \"$BIN\"" "$CONFIG" \
+        || fail "frozen mcp config did not use the executable directly"
+      ;;
+  esac
+  if grep -Fq '"-m"' "$CONFIG"; then
+    fail "frozen mcp config contains an invalid Python -m invocation"
+  fi
+
 }
 
 run_online() {

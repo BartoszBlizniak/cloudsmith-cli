@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools==82.0.1", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "cloudsmith-cli"
 dynamic = ["version"]
 description = "Cloudsmith Command-Line Interface (CLI)"
 readme = "README.md"
-license = { text = "Apache License 2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Cloudsmith Ltd", email = "support@cloudsmith.io" },
 ]
@@ -25,7 +26,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.10",
@@ -77,12 +77,30 @@ dev = [
     "httpretty",
     "bumpversion",
 ]
+binary = [
+    "pyinstaller==6.20.0",
+    "pyinstaller-hooks-contrib==2026.5",
+    "setuptools==82.0.1",
+    "wheel==0.47.0",
+]
+release = [
+    "build==1.5.0",
+    "check-wheel-contents==0.6.3",
+    "setuptools==82.0.1",
+    "twine==6.2.0",
+    "wheel==0.47.0",
+]
 
 [tool.setuptools.dynamic]
 version = { file = "cloudsmith_cli/data/VERSION" }
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
-exclude = ["tests*"]
+include = ["cloudsmith_cli*"]
+exclude = ["cloudsmith_cli.tests*", "cloudsmith_cli.*.tests*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 cloudsmith_cli = ["data/*", "templates/*"]

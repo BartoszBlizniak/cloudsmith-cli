@@ -11,8 +11,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # Test jobs run across Python versions
   pytest:
     name: Run tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

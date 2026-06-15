@@ -152,6 +152,8 @@ tar -xzf cloudsmith-<version>-<target>.tar.gz
 
 Available targets: `linux-x86_64-gnu`, `linux-x86_64-musl`, `linux-aarch64-gnu`, `linux-aarch64-musl`, `macos-arm64`, `macos-x86_64`, and `windows-x86_64` (as a `.zip`).
 
+Standalone binaries include all optional features, including AWS OIDC support.
+
 ### Optional Dependencies
 
 The CLI supports optional extras for additional functionality:
