@@ -161,7 +161,6 @@ jobs:
             pyinstaller \
             pyinstaller-hooks-contrib
           python -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
-          python packaging/pyinstaller/check_warnings.py build/cloudsmith/warn-cloudsmith.txt
           mkdir -p out
           case "${ART}" in
             *.zip) (cd dist && 7z a -bso0 "../out/${ART}" cloudsmith) ;;
@@ -189,7 +188,6 @@ jobs:
                 pyinstaller \
                 pyinstaller-hooks-contrib >/dev/null
               python -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
-              python packaging/pyinstaller/check_warnings.py build/cloudsmith/warn-cloudsmith.txt
               tar -czf "out/${ART}" -C dist cloudsmith
             '
 
@@ -213,7 +211,6 @@ jobs:
                 pyinstaller \
                 pyinstaller-hooks-contrib >/dev/null
               python3.12 -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
-              python3.12 packaging/pyinstaller/check_warnings.py build/cloudsmith/warn-cloudsmith.txt
               MAXV="$(
                 while IFS= read -r -d "" candidate; do
                   if file "${candidate}" | grep -q ELF; then

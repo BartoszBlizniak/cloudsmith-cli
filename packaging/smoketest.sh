@@ -53,6 +53,20 @@ fi
 echo "== gate self-test OK (import/dep detector fires) =="
 
 run_offline() {
+  echo "== self-import sweep (every bundled cloudsmith_cli module loads) =="
+  # Runtime proof the freeze is complete: import every bundled module. Catches
+  # an uncollected module deterministically, replacing the static warn-file
+  # gate. Functional data/metadata/dynamic paths are covered by the steps below.
+  SWEEP=$( (
+    unset CLOUDSMITH_API_KEY CLOUDSMITH_API_TOKEN 2>/dev/null
+    CLOUDSMITH_SELFTEST=1 PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
+      "$BIN" 2>&1
+  ) || true )
+  no_dep_error "$SWEEP" "self-import sweep"
+  printf '%s\n' "$SWEEP" | tail -1
+  printf '%s\n' "$SWEEP" | grep -q "SELFTEST: OK" \
+    || fail "self-import sweep reported missing modules: $SWEEP"
+
   echo "== --version =="
   VERSION_OUT=$("$BIN" --version) || fail "--version exited nonzero"
   printf '%s\n' "$VERSION_OUT"
