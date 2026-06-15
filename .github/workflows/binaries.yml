@@ -45,9 +45,9 @@ jobs:
         run: |
           MATRIX=$(jq -c . <<'JSON'
           {"include":[
-            {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"native","test_runner":"ubuntu-24.04","test_kind":"docker","image":"debian:stable-slim","archive":".tar.gz"},
+            {"name":"linux-x86_64-gnu","build_runner":"ubuntu-24.04","mode":"manylinux","build_image":"quay.io/pypa/manylinux_2_28_x86_64","test_runner":"ubuntu-24.04","test_kind":"docker","image":"debian:11-slim","archive":".tar.gz"},
             {"name":"linux-x86_64-musl","build_runner":"ubuntu-24.04","mode":"alpine","test_runner":"ubuntu-24.04","test_kind":"docker","image":"alpine:3.20","archive":".tar.gz"},
-            {"name":"linux-aarch64-gnu","build_runner":"ubuntu-24.04-arm","mode":"native","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"debian:stable-slim","archive":".tar.gz"},
+            {"name":"linux-aarch64-gnu","build_runner":"ubuntu-24.04-arm","mode":"manylinux","build_image":"quay.io/pypa/manylinux_2_28_aarch64","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"debian:11-slim","archive":".tar.gz"},
             {"name":"linux-aarch64-musl","build_runner":"ubuntu-24.04-arm","mode":"alpine","test_runner":"ubuntu-24.04-arm","test_kind":"docker","image":"alpine:3.20","archive":".tar.gz"},
             {"name":"macos-arm64","build_runner":"macos-14","mode":"native","test_runner":"macos-14","test_kind":"macos","image":"","archive":".tar.gz"},
             {"name":"macos-x86_64","build_runner":"macos-15-intel","mode":"native","test_runner":"macos-15-intel","test_kind":"macos","image":"","archive":".tar.gz"},
@@ -75,7 +75,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - if: matrix.mode != 'alpine'
+      # Host Python only for the macOS/Windows native builds. Linux gnu builds
+      # in a manylinux container and musl builds in an Alpine container, each
+      # supplying its own interpreter.
+      - if: matrix.mode == 'native'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -118,6 +121,36 @@ jobs:
               python -m pip install --root-user-action=ignore --upgrade pip >/dev/null
               pip install --root-user-action=ignore -c packaging/constraints.txt . "pyinstaller==${PYINSTALLER_VERSION}" >/dev/null
               pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+              tar -czf "out/${ART}" -C dist cloudsmith
+            '
+
+      # Linux glibc build runs inside manylinux_2_28 (glibc 2.28) so the binary
+      # runs on RHEL 8+, Debian 11+, Ubuntu 22.04+, Amazon Linux 2023 — building
+      # on the stock runner would pin a much newer glibc floor. We then assert
+      # the floor stays <= 2.28 so a future dep can't silently raise it.
+      - if: matrix.mode == 'manylinux'
+        env:
+          ART: ${{ steps.art.outputs.name }}
+          BUILD_IMAGE: ${{ matrix.build_image }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm \
+            -e PYINSTALLER_VERSION="${PYINSTALLER_VERSION}" \
+            -e ART="${ART}" \
+            -v "${PWD}:/src" -w /src \
+            "${BUILD_IMAGE}" bash -c '
+              set -e
+              PYBIN=/opt/python/cp312-cp312/bin
+              "$PYBIN/python" -m pip install --root-user-action=ignore --upgrade pip >/dev/null
+              "$PYBIN/python" -m pip install --root-user-action=ignore -c packaging/constraints.txt . "pyinstaller==${PYINSTALLER_VERSION}" >/dev/null
+              "$PYBIN/pyinstaller" --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+              MAXV=$(objdump -T dist/cloudsmith/cloudsmith dist/cloudsmith/_internal/*.so* 2>/dev/null \
+                     | grep -oE "GLIBC_[0-9.]+" | sed "s/GLIBC_//" | sort -V | tail -1)
+              echo "glibc floor: ${MAXV}"
+              if [ "$(printf "2.28\n%s\n" "${MAXV}" | sort -V | tail -1)" != "2.28" ]; then
+                echo "FAIL: glibc floor ${MAXV} exceeds 2.28"; exit 1
+              fi
               tar -czf "out/${ART}" -C dist cloudsmith
             '
 
