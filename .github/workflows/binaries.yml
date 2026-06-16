@@ -155,6 +155,12 @@ jobs:
           ARCHIVE: ${{ matrix.archive }}
         run: echo "name=cloudsmith-$(cat cloudsmith_cli/data/VERSION)-${TARGET}${ARCHIVE}" >> "$GITHUB_OUTPUT"
 
+      - if: matrix.mode == 'glibc'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/nuitka-cache
+          key: nuitka-cache-${{ matrix.name }}-v1-${{ hashFiles('uv.lock', 'packaging/nuitka/entry.py') }}
+
       - if: matrix.mode == 'native'
         shell: bash
         env:
@@ -203,19 +209,28 @@ jobs:
           BUILD_IMAGE: ${{ matrix.build_image }}
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out "${RUNNER_TEMP}/nuitka-cache"
           docker run --rm \
             -e ART="${ART}" \
+            -e NUITKA_CACHE_DIR=/cache/nuitka \
+            -e CCACHE_DIR=/cache/ccache \
             -v "${PWD}:/src" -w /src \
+            -v "${RUNNER_TEMP}/nuitka-cache:/cache" \
             "${BUILD_IMAGE}" bash -c '
               set -euo pipefail
               dnf install -y epel-release >/dev/null
-              dnf install -y python3.12 python3.12-pip python3.12-devel gcc binutils file patchelf >/dev/null
+              dnf install -y python3.12 python3.12-pip python3.12-devel gcc binutils file patchelf ccache >/dev/null
+              ccache -z >/dev/null 2>&1 || true
               python3.12 -m pip install \
                 -c packaging/constraints.txt \
                 "." \
                 nuitka >/dev/null
+              SECONDS=0
               python3.12 -m nuitka packaging/nuitka/entry.py
+              echo "NUITKA_BUILD_SECONDS=${SECONDS}"
+              echo "=== ccache stats ==="
+              ccache -s || true
+              chmod -R a+rX /cache 2>/dev/null || true
               mv dist/entry.dist dist/cloudsmith
               MAXV="$(
                 while IFS= read -r -d "" candidate; do
