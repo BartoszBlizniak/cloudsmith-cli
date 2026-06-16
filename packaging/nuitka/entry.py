@@ -21,10 +21,6 @@
 # nuitka-project: --include-package=keyring
 # nuitka-project: --include-distribution-metadata=keyring
 # nuitka-project: --include-package=mcp
-# nuitka-project: --include-package=boto3
-# nuitka-project: --include-package-data=boto3
-# nuitka-project: --include-package=botocore
-# nuitka-project: --include-package-data=botocore
 # nuitka-project: --include-package-data=certifi
 # nuitka-project: --include-distribution-metadata=cloudsmith-cli
 # nuitka-project: --include-distribution-metadata=cloudsmith-api

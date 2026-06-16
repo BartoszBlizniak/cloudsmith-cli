@@ -164,7 +164,7 @@ jobs:
           set -euo pipefail
           python -m pip install \
             -c packaging/constraints.txt \
-            ".[all]" \
+            "." \
             nuitka
           python -m nuitka packaging/nuitka/entry.py
           mv dist/entry.dist dist/cloudsmith
@@ -190,7 +190,7 @@ jobs:
               python -m pip install \
                 --root-user-action=ignore \
                 -c packaging/constraints.txt \
-                ".[all]" \
+                "." \
                 nuitka >/dev/null
               python -m nuitka packaging/nuitka/entry.py
               mv dist/entry.dist dist/cloudsmith
@@ -213,7 +213,7 @@ jobs:
               dnf install -y python3.12 python3.12-pip python3.12-devel gcc binutils file patchelf >/dev/null
               python3.12 -m pip install \
                 -c packaging/constraints.txt \
-                ".[all]" \
+                "." \
                 nuitka >/dev/null
               python3.12 -m nuitka packaging/nuitka/entry.py
               mv dist/entry.dist dist/cloudsmith
