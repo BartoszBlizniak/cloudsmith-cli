@@ -78,8 +78,7 @@ dev = [
     "bumpversion",
 ]
 binary = [
-    "pyinstaller==6.20.0",
-    "pyinstaller-hooks-contrib==2026.5",
+    "nuitka==4.1.2",
     "setuptools==82.0.1",
     "wheel==0.47.0",
 ]

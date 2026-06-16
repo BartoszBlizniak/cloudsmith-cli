@@ -62,13 +62,15 @@ class DockerInstaller:
         """Return the command the launcher forwards to.
 
         A pip/source install resolves the bare ``cloudsmith`` command via
-        ``PATH``.  A frozen standalone binary (PyInstaller) is not guaranteed
-        to be on ``PATH`` under that name, so point the launcher at the
-        absolute executable instead — mirroring the frozen handling in
+        ``PATH``.  A frozen standalone binary is not guaranteed to be on
+        ``PATH`` under that name, so point the launcher at the absolute
+        executable instead — mirroring the frozen handling in
         :func:`cloudsmith_cli.cli.commands.mcp._get_server_config`.  The path
         is quoted so a directory containing spaces still execs correctly.
         """
-        if getattr(sys, "frozen", False):
+        # PyInstaller sets ``sys.frozen``; Nuitka sets the module-level
+        # ``__compiled__`` instead — accept either to detect a frozen binary.
+        if getattr(sys, "frozen", False) or "__compiled__" in globals():
             return f'"{sys.executable}" credential-helper docker'
         return cls.TARGET_CMD
 

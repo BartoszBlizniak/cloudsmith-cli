@@ -84,7 +84,7 @@ run_offline() {
   echo "== per-command --help sweep (forces every command module to import) =="
   # Parse top-level command names from --help (first alias before any '|') and
   # run --help on each. Catches a command whose module / option construction
-  # pulls an import PyInstaller did not collect.
+  # pulls an import the binary build did not include.
   # Stop at the blank line ending the Commands block so a wrapped epilog line
   # (e.g. a docs URL) can never be parsed as a bogus command name.
   CMDS=$("$BIN" --help 2>/dev/null | awk '/^Commands:/{f=1; next} f && /^[[:space:]]*$/{f=0} f && /^[[:space:]]+[a-z]/{print $1}' | cut -d'|' -f1)

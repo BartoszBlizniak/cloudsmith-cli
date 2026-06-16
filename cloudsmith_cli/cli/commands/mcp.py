@@ -291,7 +291,10 @@ def configure(ctx, opts, client, is_global):  # pylint: disable=unused-argument
 
 def _get_server_config(profile=None):
     """Determine the first available command configuration to run the MCP server."""
-    is_frozen = getattr(sys, "frozen", False)
+    # A standalone binary has no Python on PATH, so the MCP client must invoke
+    # this executable directly. PyInstaller sets ``sys.frozen``; Nuitka sets the
+    # module-level ``__compiled__`` instead — accept either.
+    is_frozen = getattr(sys, "frozen", False) or "__compiled__" in globals()
     in_venv = hasattr(sys, "real_prefix") or (
         hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
     )

@@ -720,7 +720,7 @@ def test_uninstall_tolerates_malformed_cred_helpers(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 18. frozen-binary launcher target (PyInstaller standalone)
+# 18. frozen-binary launcher target (standalone binary)
 # ---------------------------------------------------------------------------
 
 

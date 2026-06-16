@@ -3,6 +3,10 @@ name: binaries
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: Single target to build, or 'all' for the full matrix
+        type: string
+        default: all
       online_smoketest:
         description: Run read-only online smoketests
         type: boolean
@@ -104,6 +108,7 @@ jobs:
       - id: gen
         env:
           EVENT: ${{ github.event_name }}
+          TARGET: ${{ inputs.target }}
         run: |
           MATRIX=$(jq -c . <<'JSON'
           {"include":[
@@ -119,6 +124,8 @@ jobs:
           )
           if [ "${EVENT}" = "pull_request" ]; then
             MATRIX=$(printf '%s' "${MATRIX}" | jq -c '{include: [.include[] | select(.name == "linux-x86_64-gnu")]}')
+          elif [ -n "${TARGET:-}" ] && [ "${TARGET}" != "all" ]; then
+            MATRIX=$(printf '%s' "${MATRIX}" | jq -c --arg t "${TARGET}" '{include: [.include[] | select(.name == $t)]}')
           fi
           echo "include=${MATRIX}" >> "$GITHUB_OUTPUT"
 
@@ -128,7 +135,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.include) }}
     runs-on: ${{ matrix.build_runner }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       PYTHON_VERSION: "3.12"
     steps:
@@ -152,15 +159,15 @@ jobs:
         shell: bash
         env:
           ART: ${{ steps.art.outputs.name }}
-          PYINSTALLER_CONFIG_DIR: ${{ runner.temp }}/pyinstaller
+          NUITKA_CACHE_DIR: ${{ runner.temp }}/nuitka
         run: |
           set -euo pipefail
           python -m pip install \
             -c packaging/constraints.txt \
             ".[all]" \
-            pyinstaller \
-            pyinstaller-hooks-contrib
-          python -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+            nuitka
+          python -m nuitka packaging/nuitka/entry.py
+          mv dist/entry.dist dist/cloudsmith
           mkdir -p out
           case "${ART}" in
             *.zip) (cd dist && 7z a -bso0 "../out/${ART}" cloudsmith) ;;
@@ -176,18 +183,17 @@ jobs:
           mkdir -p out
           docker run --rm \
             -e ART="${ART}" \
-            -e PYINSTALLER_CONFIG_DIR=/tmp/pyinstaller \
             -v "${PWD}:/src" -w /src \
             "${BUILD_IMAGE}" sh -c '
               set -eu
-              apk add --no-cache build-base zlib-dev libffi-dev >/dev/null
+              apk add --no-cache build-base zlib-dev libffi-dev patchelf >/dev/null
               python -m pip install \
                 --root-user-action=ignore \
                 -c packaging/constraints.txt \
                 ".[all]" \
-                pyinstaller \
-                pyinstaller-hooks-contrib >/dev/null
-              python -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+                nuitka >/dev/null
+              python -m nuitka packaging/nuitka/entry.py
+              mv dist/entry.dist dist/cloudsmith
               tar -czf "out/${ART}" -C dist cloudsmith
             '
 
@@ -200,17 +206,17 @@ jobs:
           mkdir -p out
           docker run --rm \
             -e ART="${ART}" \
-            -e PYINSTALLER_CONFIG_DIR=/tmp/pyinstaller \
             -v "${PWD}:/src" -w /src \
             "${BUILD_IMAGE}" bash -c '
               set -euo pipefail
-              dnf install -y python3.12 python3.12-pip python3.12-devel gcc binutils file >/dev/null
+              dnf install -y epel-release >/dev/null
+              dnf install -y python3.12 python3.12-pip python3.12-devel gcc binutils file patchelf >/dev/null
               python3.12 -m pip install \
                 -c packaging/constraints.txt \
                 ".[all]" \
-                pyinstaller \
-                pyinstaller-hooks-contrib >/dev/null
-              python3.12 -m PyInstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
+                nuitka >/dev/null
+              python3.12 -m nuitka packaging/nuitka/entry.py
+              mv dist/entry.dist dist/cloudsmith
               MAXV="$(
                 while IFS= read -r -d "" candidate; do
                   if file "${candidate}" | grep -q ELF; then
