@@ -81,13 +81,24 @@ def _selftest() -> int:
     """
     failed = []
 
+    def _is_test_module(name: str) -> bool:
+        # Test packages are excluded from the binary (--nofollow-import-to).
+        # Under Nuitka they stay enumerable but raise an "actively excluded"
+        # ImportError on import; they are not runtime code, so the completeness
+        # sweep skips them (PyInstaller dropped them from the bundle entirely).
+        return "tests" in name.split(".")
+
     def _onerror(name):
+        if _is_test_module(name):
+            return
         failed.append(f"{name}: {sys.exc_info()[1]!r}")
 
     count = 0
     for info in pkgutil.walk_packages(
         cloudsmith_cli.__path__, "cloudsmith_cli.", onerror=_onerror
     ):
+        if _is_test_module(info.name):
+            continue
         count += 1
         try:
             importlib.import_module(info.name)
