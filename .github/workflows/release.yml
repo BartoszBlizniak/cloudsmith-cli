@@ -246,6 +246,10 @@ jobs:
       CLOUDSMITH_SERVICE_SLUG: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: cloudsmith-*
@@ -263,15 +267,9 @@ jobs:
           path: binaries
 
       - name: Set up the built cloudsmith binary on the runner
-        run: |
-          set -euo pipefail
-          ARCHIVE="binaries/cloudsmith-${VERSION}-linux-x86_64-gnu.tar.gz"
-          test -f "${ARCHIVE}"
-          DEST="${RUNNER_TEMP}/cloudsmith-cli"
-          mkdir -p "${DEST}"
-          tar -xzf "${ARCHIVE}" -C "${DEST}"
-          chmod +x "${DEST}/cloudsmith/cloudsmith"
-          echo "${DEST}/cloudsmith" >> "$GITHUB_PATH"
+        uses: ./.github/actions/setup-cloudsmith-binary
+        with:
+          version: ${{ needs.validate.outputs.version }}
 
       - name: Pre-authenticate with OIDC
         run: |
@@ -378,17 +376,10 @@ jobs:
           path: binaries
 
       - name: Set up the built cloudsmith binary on the runner
-        run: |
-          set -euo pipefail
-          ARCHIVE="binaries/cloudsmith-${VERSION}-linux-x86_64-gnu.tar.gz"
-          test -f "${ARCHIVE}"
-          DEST="${RUNNER_TEMP}/cloudsmith-cli"
-          mkdir -p "${DEST}"
-          tar -xzf "${ARCHIVE}" -C "${DEST}"
-          chmod +x "${DEST}/cloudsmith/cloudsmith"
-          mkdir -p "${HOME}/.local/bin"
-          echo "${DEST}/cloudsmith" >> "$GITHUB_PATH"
-          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/setup-cloudsmith-binary
+        with:
+          version: ${{ needs.validate.outputs.version }}
+          add-local-bin: "true"
 
       - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
 
