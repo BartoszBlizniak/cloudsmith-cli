@@ -187,6 +187,8 @@ jobs:
     env:
       CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
       CLOUDSMITH_REPO: ${{ vars.CLOUDSMITH_REPO }}
+      CLOUDSMITH_ORG: ${{ vars.CLOUDSMITH_NAMESPACE }}
+      CLOUDSMITH_SERVICE_SLUG: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -200,10 +202,21 @@ jobs:
           name: python-distributions
           path: python
 
-      - uses: cloudsmith-io/cloudsmith-cli-action@159f1619275d5d3147f059c3cc110938ec221d16 # v2.0.3
-        with:
-          oidc-namespace: ${{ vars.CLOUDSMITH_NAMESPACE }}
-          oidc-service-slug: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
+      - name: Set up the built cloudsmith binary on the runner
+        run: |
+          set -euo pipefail
+          ARCHIVE="binaries/cloudsmith-${VERSION}-linux-x86_64-gnu.tar.gz"
+          test -f "${ARCHIVE}"
+          DEST="${RUNNER_TEMP}/cloudsmith-cli"
+          mkdir -p "${DEST}"
+          tar -xzf "${ARCHIVE}" -C "${DEST}"
+          chmod +x "${DEST}/cloudsmith/cloudsmith"
+          echo "${DEST}/cloudsmith" >> "$GITHUB_PATH"
+
+      - name: Pre-authenticate with OIDC
+        run: |
+          set -euo pipefail
+          cloudsmith whoami
 
       - name: Publish binaries and Python distributions
         run: |
@@ -265,11 +278,14 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     env:
       CLOUDSMITH_NAMESPACE: ${{ vars.CLOUDSMITH_NAMESPACE }}
       CLOUDSMITH_REPO: ${{ vars.CLOUDSMITH_REPO }}
       CLOUDSMITH_SERVICE_SLUG: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
+      CLOUDSMITH_ORG: ${{ vars.CLOUDSMITH_NAMESPACE }}
       DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_PAT != '' }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -282,20 +298,41 @@ jobs:
           merge-multiple: true
           path: binaries
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: cloudsmith-linux-x86_64-gnu
+          merge-multiple: true
+          path: binaries
+
+      - name: Set up the built cloudsmith binary on the runner
+        run: |
+          set -euo pipefail
+          ARCHIVE="binaries/cloudsmith-${VERSION}-linux-x86_64-gnu.tar.gz"
+          test -f "${ARCHIVE}"
+          DEST="${RUNNER_TEMP}/cloudsmith-cli"
+          mkdir -p "${DEST}"
+          tar -xzf "${ARCHIVE}" -C "${DEST}"
+          chmod +x "${DEST}/cloudsmith/cloudsmith"
+          mkdir -p "${HOME}/.local/bin"
+          echo "${DEST}/cloudsmith" >> "$GITHUB_PATH"
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+
       - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
-      - name: Authenticate both registries
+      - name: Authenticate to docker.cloudsmith.io via OIDC credential helper
+        run: |
+          set -euo pipefail
+          cloudsmith whoami
+          cloudsmith credential-helper install docker
+
+      - name: Authenticate to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
         env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
           DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
         run: |
           set -euo pipefail
-          echo "${CLOUDSMITH_API_KEY}" \
-            | docker login docker.cloudsmith.io \
-              -u "${CLOUDSMITH_SERVICE_SLUG}" \
-              --password-stdin
           echo "${DOCKERHUB_PAT}" \
             | docker login \
               -u "${DOCKERHUB_USER}" \
@@ -310,11 +347,14 @@ jobs:
           test -f "${AMD64}.sha256"
           test -f "${ARM64}"
           test -f "${ARM64}.sha256"
+          TAGS=(-t "docker.cloudsmith.io/${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}/cloudsmith-cli:${VERSION}")
+          if [ "${HAS_DOCKERHUB}" = "true" ]; then
+            TAGS+=(-t "cloudsmith/cloudsmith-cli:${VERSION}")
+          fi
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-arg "CLOUDSMITH_CLI_VERSION=${VERSION}" \
-            -t "docker.cloudsmith.io/${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}/cloudsmith-cli:${VERSION}" \
-            -t "cloudsmith/cloudsmith-cli:${VERSION}" \
+            "${TAGS[@]}" \
             --push .
 
   publish-github:
