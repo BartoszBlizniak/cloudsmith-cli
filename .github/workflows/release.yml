@@ -287,8 +287,8 @@ jobs:
           }
 
           push_raw_if_absent() {
-            # Args: <namespace/repo> <file> <package-name>
-            local repo="$1" file="$2" name="$3"
+            # Args: <namespace/repo> <file> <package-name> <comma-separated-tags>
+            local repo="$1" file="$2" name="$3" tags="$4"
             local base
             base="$(basename "${file}")"
             if [ "$(package_count "${repo}" "${base}")" != "0" ]; then
@@ -299,7 +299,8 @@ jobs:
               "${repo}" \
               "${file}" \
               --name "${name}" \
-              --version "${VERSION}"
+              --version "${VERSION}" \
+              --tags "${tags}"
           }
 
           push_python_if_absent() {
@@ -323,17 +324,41 @@ jobs:
             fi
             ARCHIVE="binaries/cloudsmith-${VERSION}-${TARGET}${EXT}"
             test -f "${ARCHIVE}"
+
+            # Queryable tags so CI/CD can select the right artifact by version +
+            # platform, e.g.
+            #   cloudsmith ls packages <repo> \
+            #     -q 'version:1.19.0 AND tag:standalone-binary AND tag:linux AND tag:x86_64 AND tag:musl'
+            # Tags: os / arch / (libc, linux only) / full-target, plus a type tag
+            # (standalone-binary vs signature). os+arch+libc uniquely select one
+            # archive; the full-target tag is a convenience selector.
+            OS="${TARGET%%-*}"
+            REST="${TARGET#*-}"
+            case "${OS}" in
+              linux)
+                ARCH="${REST%-*}"
+                LIBC="${REST##*-}"
+                COMMON="${OS},${ARCH},${LIBC},${TARGET}"
+                ;;
+              *)
+                ARCH="${REST}"
+                COMMON="${OS},${ARCH},${TARGET}"
+                ;;
+            esac
+
             push_raw_if_absent \
               "${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}" \
               "${ARCHIVE}" \
-              "cloudsmith-cli-${TARGET}"
+              "cloudsmith-cli-${TARGET}" \
+              "standalone-binary,${COMMON}"
             case "${TARGET}" in
               linux-*)
                 test -f "${ARCHIVE}.sig"
                 push_raw_if_absent \
                   "${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}" \
                   "${ARCHIVE}.sig" \
-                  "cloudsmith-cli-${TARGET}-sig"
+                  "cloudsmith-cli-${TARGET}-sig" \
+                  "signature,${COMMON}"
                 ;;
             esac
           done
