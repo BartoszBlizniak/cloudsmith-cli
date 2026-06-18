@@ -254,6 +254,8 @@ jobs:
             --republish
 
   publish-pypi:
+    # Disabled for the fork dogfooding test — publish to Cloudsmith only.
+    if: false
     needs: [validate, stage-github, python-distributions]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -358,6 +360,9 @@ jobs:
             --push .
 
   publish-github:
+    # Disabled for the fork dogfooding test — the GitHub release stays a draft;
+    # we publish to Cloudsmith only.
+    if: false
     needs:
       - validate
       - stage-github
