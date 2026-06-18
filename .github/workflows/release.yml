@@ -270,6 +270,52 @@ jobs:
       - name: Publish binaries and Python distributions
         run: |
           set -euo pipefail
+
+          # The Cloudsmith release repo enforces tag immutability: re-pushing an
+          # already-published file fails. So we skip-if-already-published and only
+          # push what is new (no --republish, which would attempt an overwrite).
+          #
+          # Existence is checked via the CLI (already OIDC-authed on PATH; this job
+          # has no API key). `cloudsmith ls packages -F json` emits a JSON object
+          # shaped like {"data": [ {... "filename": "<name>" ...}, ... ], "meta": ...}
+          # on stdout (status text goes to stderr). We query the exact filename with
+          # an anchored `filename:^<basename>$` term and count the data entries.
+          package_count() {
+            # Args: <namespace/repo> <basename>
+            cloudsmith ls packages "$1" -q "filename:^$2\$" -F json \
+              | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("data", [])))'
+          }
+
+          push_raw_if_absent() {
+            # Args: <namespace/repo> <file> <package-name>
+            local repo="$1" file="$2" name="$3"
+            local base
+            base="$(basename "${file}")"
+            if [ "$(package_count "${repo}" "${base}")" != "0" ]; then
+              echo "skip (already published): ${file}"
+              return 0
+            fi
+            cloudsmith push raw \
+              "${repo}" \
+              "${file}" \
+              --name "${name}" \
+              --version "${VERSION}"
+          }
+
+          push_python_if_absent() {
+            # Args: <namespace/repo> <file>
+            local repo="$1" file="$2"
+            local base
+            base="$(basename "${file}")"
+            if [ "$(package_count "${repo}" "${base}")" != "0" ]; then
+              echo "skip (already published): ${file}"
+              return 0
+            fi
+            cloudsmith push python \
+              "${repo}" \
+              "${file}"
+          }
+
           for TARGET in ${BINARY_TARGETS}; do
             EXT=.tar.gz
             if [ "${TARGET}" = windows-x86_64 ]; then
@@ -277,32 +323,26 @@ jobs:
             fi
             ARCHIVE="binaries/cloudsmith-${VERSION}-${TARGET}${EXT}"
             test -f "${ARCHIVE}"
-            cloudsmith push raw \
+            push_raw_if_absent \
               "${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}" \
               "${ARCHIVE}" \
-              --name "cloudsmith-cli-${TARGET}" \
-              --version "${VERSION}" \
-              --republish
+              "cloudsmith-cli-${TARGET}"
             case "${TARGET}" in
               linux-*)
                 test -f "${ARCHIVE}.sig"
-                cloudsmith push raw \
+                push_raw_if_absent \
                   "${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}" \
                   "${ARCHIVE}.sig" \
-                  --name "cloudsmith-cli-${TARGET}-sig" \
-                  --version "${VERSION}" \
-                  --republish
+                  "cloudsmith-cli-${TARGET}-sig"
                 ;;
             esac
           done
-          cloudsmith push python \
+          push_python_if_absent \
             "${CLOUDSMITH_NAMESPACE}/cli" \
-            "python/cloudsmith_cli-${VERSION}.tar.gz" \
-            --republish
-          cloudsmith push python \
+            "python/cloudsmith_cli-${VERSION}.tar.gz"
+          push_python_if_absent \
             "${CLOUDSMITH_NAMESPACE}/cli" \
-            "python/cloudsmith_cli-${VERSION}-py3-none-any.whl" \
-            --republish
+            "python/cloudsmith_cli-${VERSION}-py3-none-any.whl"
 
   publish-pypi:
     # Disabled for the fork dogfooding test — publish to Cloudsmith only.
@@ -393,10 +433,29 @@ jobs:
           test -f "${AMD64}.sha256"
           test -f "${ARM64}"
           test -f "${ARM64}.sha256"
-          TAGS=(-t "docker.cloudsmith.io/${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}/cloudsmith-cli:${VERSION}")
+
+          # The Cloudsmith registry enforces tag immutability, so only push the
+          # docker.cloudsmith.io tag if it does not already exist. This inspect
+          # runs after the OIDC credential-helper auth step above, so it is
+          # authenticated against the private registry; a non-zero exit is
+          # therefore treated strictly as "tag not present" rather than a 401.
+          # Docker Hub is mutable, so its tag needs no existence check.
+          CLOUDSMITH_IMAGE="docker.cloudsmith.io/${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}/cloudsmith-cli:${VERSION}"
+          TAGS=()
+          if docker buildx imagetools inspect "${CLOUDSMITH_IMAGE}" >/dev/null 2>&1; then
+            echo "skip (already published): ${CLOUDSMITH_IMAGE}"
+          else
+            TAGS+=(-t "${CLOUDSMITH_IMAGE}")
+          fi
           if [ "${HAS_DOCKERHUB}" = "true" ]; then
             TAGS+=(-t "cloudsmith/cloudsmith-cli:${VERSION}")
           fi
+
+          if [ "${#TAGS[@]}" -eq 0 ]; then
+            echo "image ${VERSION} already published; skipping"
+            exit 0
+          fi
+
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-arg "CLOUDSMITH_CLI_VERSION=${VERSION}" \
