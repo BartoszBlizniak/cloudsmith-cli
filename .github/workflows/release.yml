@@ -13,8 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Single source of truth for the binary targets. Adding a platform means
-  # editing this list (plus the binaries.yml matrix); nothing else hardcodes it.
+  # Single source of truth for binary targets (also update the binaries.yml matrix).
   BINARY_TARGETS: "linux-x86_64-gnu linux-x86_64-musl linux-aarch64-gnu linux-aarch64-musl macos-arm64 macos-x86_64 windows-x86_64"
 
 jobs:
@@ -271,23 +270,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The Cloudsmith release repo enforces tag immutability: re-pushing an
-          # already-published file fails. So we skip-if-already-published and only
-          # push what is new (no --republish, which would attempt an overwrite).
-          #
-          # Existence is checked via the CLI (already OIDC-authed on PATH; this job
-          # has no API key). `cloudsmith ls packages -F json` emits a JSON object
-          # shaped like {"data": [ {... "filename": "<name>" ...}, ... ], "meta": ...}
-          # on stdout (status text goes to stderr). We query the exact filename with
-          # an anchored `filename:^<basename>$` term and count the data entries.
+          # Immutable repo: skip already-published files (no overwrite). Existence
+          # via the OIDC-authed CLI, anchored filename query, counting results.
           package_count() {
-            # Args: <namespace/repo> <basename>
-            # The anchored filename:^...$ query is an exact match in practice
-            # (verified: matches the archive but not its .sig, and 0 for absent).
-            # Cloudsmith's search is NOT PCRE — backslash-escaping '.' makes the
-            # query literal and returns no matches, so the basename is passed
-            # as-is. Filenames are unique enough that the unescaped '.' cannot
-            # collide across our artifact set.
+            # Args: <namespace/repo> <basename>. filename:^...$ is exact here
+            # (Cloudsmith search isn't PCRE; escaping dots breaks it).
             cloudsmith ls packages "$1" -q "filename:^$2\$" -F json \
               | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("data", [])))'
           }
@@ -331,13 +318,8 @@ jobs:
             ARCHIVE="binaries/cloudsmith-${VERSION}-${TARGET}${EXT}"
             test -f "${ARCHIVE}"
 
-            # Queryable tags so CI/CD can select the right artifact by version +
-            # platform, e.g.
-            #   cloudsmith ls packages <repo> \
-            #     -q 'version:1.19.0 AND tag:standalone-binary AND tag:linux AND tag:x86_64 AND tag:musl'
-            # Tags: os / arch / (libc, linux only) / full-target, plus a type tag
-            # (standalone-binary vs signature). os+arch+libc uniquely select one
-            # archive; the full-target tag is a convenience selector.
+            # Queryable tags for CI artifact selection (e.g. version:X AND tag:linux
+            # AND tag:x86_64 AND tag:musl): type, os, arch, libc (linux), full-target.
             OS="${TARGET%%-*}"
             REST="${TARGET#*-}"
             case "${OS}" in
@@ -463,12 +445,8 @@ jobs:
           test -f "${ARM64}"
           test -f "${ARM64}.sha256"
 
-          # The Cloudsmith registry enforces tag immutability, so only push the
-          # docker.cloudsmith.io tag if it does not already exist. This inspect
-          # runs after the OIDC credential-helper auth step above, so it is
-          # authenticated against the private registry; a non-zero exit is
-          # therefore treated strictly as "tag not present" rather than a 401.
-          # Docker Hub is mutable, so its tag needs no existence check.
+          # Immutable Cloudsmith repo: push the tag only if absent (inspect runs
+          # post-auth, so non-zero = not present). Docker Hub is mutable.
           CLOUDSMITH_IMAGE="docker.cloudsmith.io/${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}/cloudsmith-cli:${VERSION}"
           TAGS=()
           if docker buildx imagetools inspect "${CLOUDSMITH_IMAGE}" >/dev/null 2>&1; then
@@ -476,10 +454,8 @@ jobs:
           else
             TAGS+=(-t "${CLOUDSMITH_IMAGE}")
           fi
-          # Docker Hub is mutable, so it carries the pinned version tag plus the
-          # conventional floating tags (latest / major / major.minor) that move
-          # with each release. The Cloudsmith repo is immutable and intentionally
-          # keeps only the pinned :${VERSION} tag (floating tags can't move there).
+          # Docker Hub (mutable): pinned + floating tags (latest/major/major.minor).
+          # Cloudsmith (immutable) keeps only the pinned :${VERSION} tag.
           if [ "${HAS_DOCKERHUB}" = "true" ]; then
             HUB="cloudsmith/cloudsmith-cli"
             MAJOR="${VERSION%%.*}"

@@ -186,9 +186,7 @@ jobs:
               tar -czf "out/${ART}" -C dist cloudsmith
             '
 
-      # Cache only the pip *download* cache (HTTP wheel cache), not installed
-      # site-packages. pip still resolves against constraints.txt every run, so
-      # this avoids re-downloading wheels without masking resolution failures.
+      # Cache pip's download cache only (not site-packages); resolution still runs.
       - if: matrix.mode == 'glibc'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:

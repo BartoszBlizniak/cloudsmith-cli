@@ -29,10 +29,8 @@ no_dep_error() {
 
 # Run a read-only online command; a 429 is the shared org throttling, not a
 # binary failure, so warn and pass.
-# Runs an online command and asserts success WITHOUT printing the raw response,
-# which can contain PII (email, user slug) and repository names. The dependency
-# /import-error detector still inspects the full captured output. Set
-# SMOKETEST_DEBUG=1 to print the (truncated) raw output for troubleshooting.
+# Asserts success without printing the raw response (PII / repo names). The
+# dep-error detector still sees the full output; SMOKETEST_DEBUG=1 prints it.
 online_call() {
   _label="$1"; shift
   _out=$("$BIN" "$@" 2>&1) || {
