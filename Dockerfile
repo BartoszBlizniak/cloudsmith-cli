@@ -21,8 +21,19 @@ RUN set -eu; \
 
 FROM ${ALPINE_IMAGE}
 
-LABEL maintainer="support@cloudsmith.io"
-LABEL description="Official Cloudsmith CLI"
+ARG CLOUDSMITH_CLI_VERSION
+ARG VCS_REF
+
+LABEL maintainer="support@cloudsmith.io" \
+      org.opencontainers.image.title="Cloudsmith CLI" \
+      org.opencontainers.image.description="Official Cloudsmith CLI" \
+      org.opencontainers.image.vendor="Cloudsmith" \
+      org.opencontainers.image.url="https://cloudsmith.com" \
+      org.opencontainers.image.source="https://github.com/cloudsmith-io/cloudsmith-cli" \
+      org.opencontainers.image.documentation="https://docs.cloudsmith.com/developer-tools/cli" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${CLOUDSMITH_CLI_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}"
 
 ENV PATH="/opt/cloudsmith:${PATH}"
 

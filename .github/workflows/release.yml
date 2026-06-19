@@ -470,8 +470,16 @@ jobs:
           else
             TAGS+=(-t "${CLOUDSMITH_IMAGE}")
           fi
+          # Docker Hub is mutable, so it carries the pinned version tag plus the
+          # conventional floating tags (latest / major / major.minor) that move
+          # with each release. The Cloudsmith repo is immutable and intentionally
+          # keeps only the pinned :${VERSION} tag (floating tags can't move there).
           if [ "${HAS_DOCKERHUB}" = "true" ]; then
-            TAGS+=(-t "cloudsmith/cloudsmith-cli:${VERSION}")
+            HUB="cloudsmith/cloudsmith-cli"
+            MAJOR="${VERSION%%.*}"
+            MINOR="${VERSION#*.}"; MINOR="${MINOR%%.*}"
+            TAGS+=(-t "${HUB}:${VERSION}")
+            TAGS+=(-t "${HUB}:${MAJOR}" -t "${HUB}:${MAJOR}.${MINOR}" -t "${HUB}:latest")
           fi
 
           if [ "${#TAGS[@]}" -eq 0 ]; then
@@ -482,6 +490,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-arg "CLOUDSMITH_CLI_VERSION=${VERSION}" \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
             "${TAGS[@]}" \
             --push .
 
