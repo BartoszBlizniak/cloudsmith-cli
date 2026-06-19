@@ -282,6 +282,12 @@ jobs:
           # an anchored `filename:^<basename>$` term and count the data entries.
           package_count() {
             # Args: <namespace/repo> <basename>
+            # The anchored filename:^...$ query is an exact match in practice
+            # (verified: matches the archive but not its .sig, and 0 for absent).
+            # Cloudsmith's search is NOT PCRE — backslash-escaping '.' makes the
+            # query literal and returns no matches, so the basename is passed
+            # as-is. Filenames are unique enough that the unescaped '.' cannot
+            # collide across our artifact set.
             cloudsmith ls packages "$1" -q "filename:^$2\$" -F json \
               | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("data", [])))'
           }

@@ -145,7 +145,7 @@ pip install --upgrade cloudsmith-cli --extra-index-url=https://dl.cloudsmith.io/
 
 Each release also ships self-contained binaries that bundle Python and all dependencies — no Python installation required. Download the archive for your platform from the [GitHub releases page](https://github.com/cloudsmith-io/cloudsmith-cli/releases) (or the [Cloudsmith CLI repository](https://cloudsmith.io/~cloudsmith/repos/cli/packages/)), verify it against the accompanying `.sha256` file, extract it, and add the extracted `cloudsmith` directory to your `PATH`:
 
-```
+```bash
 tar -xzf cloudsmith-<version>-<target>.tar.gz
 ./cloudsmith/cloudsmith --version
 ```

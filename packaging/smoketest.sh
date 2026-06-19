@@ -40,11 +40,11 @@ online_call() {
       echo "WARN: rate-limited (429) on ${_label}; shared org throttling, not a binary failure" >&2
       return 0
     fi
-    [ -n "${SMOKETEST_DEBUG:-}" ] && printf '%s\n' "$_out" >&2
+    [ "${SMOKETEST_DEBUG:-0}" = "1" ] && printf '%s\n' "$_out" >&2
     fail "online ${_label} failed (set SMOKETEST_DEBUG=1 for output)"
   }
   no_dep_error "$_out" "$_label"
-  if [ -n "${SMOKETEST_DEBUG:-}" ]; then
+  if [ "${SMOKETEST_DEBUG:-0}" = "1" ]; then
     printf '%s\n' "$_out" | head -15
   else
     echo "${_label}: OK"
