@@ -494,7 +494,7 @@ first installed, compatible tool.
 
 Add `--sbom` to any existing format-specific push command:
 
-```
+```shell
 cloudsmith push raw your-org/your-repo artifact.tar.gz \
   --name example --version 1.0.0 --sbom
 ```
@@ -502,7 +502,7 @@ cloudsmith push raw your-org/your-repo artifact.tar.gz \
 Syft, CycloneDX JSON 1.6, and the current directory are the defaults. Override
 them when needed:
 
-```
+```shell
 cloudsmith push raw your-org/your-repo artifact.tar.gz \
   --name example --version 1.0.0 --sbom \
   --sbom-source ./dist --sbom-generator trivy --sbom-format spdx-json

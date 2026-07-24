@@ -162,6 +162,10 @@ def resolve_push_sbom_options(
             raise click.UsageError(f"Add --sbom when using {', '.join(supplied)}.")
         return ResolvedMetadata(provided=False, content=None), None
 
+    for option_name in ("--sbom-source", "--sbom-source-identity"):
+        if custom_options[option_name] == "":
+            raise click.UsageError(f"{option_name} cannot be empty.")
+
     source = sbom_source or "."
     generator = sbom_generator or DEFAULT_GENERATOR
     output_format = sbom_format or DEFAULT_SBOM_FORMAT
@@ -223,12 +227,15 @@ def resolve_push_metadata_options(
         metadata_content_file is not None or metadata_content is not None
     )
     if not metadata_provided:
-        if metadata_content_type or metadata_source_identity:
+        if metadata_content_type is not None or metadata_source_identity is not None:
             raise click.UsageError(
                 "Add --metadata-content-file or --metadata-content when using "
                 "--metadata-content-type or --metadata-source-identity."
             )
         return ResolvedMetadata(provided=False, content=None), None
+
+    if metadata_source_identity == "":
+        raise click.UsageError("--metadata-source-identity cannot be empty.")
 
     require_metadata_content_type(
         content_type=metadata_content_type,
@@ -1142,18 +1149,29 @@ def upload_files_and_create_package(
             is_sbom=metadata_is_sbom,
         )
     elif metadata.provided:
-        # Metadata resolution/validation already warned the user; the payload
-        # is broken so a straight retry would fail. Use the "fix first" hint.
-        _print_metadata_retry_hint(
-            opts=opts,
-            owner=owner,
-            repo=repo,
-            slug=slug,
-            metadata_content_file=metadata.content_file,
-            cli_content_type=metadata.content_type,
-            cli_source_identity=metadata_source_identity,
-            reason="validation_failed",
-        )
+        # Metadata resolution/validation already warned the user. Now that the
+        # package target is known, provide the appropriate recovery guidance.
+        if metadata_is_sbom:
+            failure_context = _post_upload_sbom_failure_context(
+                owner=owner,
+                repo=repo,
+                slug=slug,
+                slug_perm=slug_perm,
+                source_identity=metadata.source_identity,
+            )
+            opts.push_metadata_info.update(failure_context)
+            _print_post_upload_sbom_retry_hint(opts, failure_context)
+        else:
+            _print_metadata_retry_hint(
+                opts=opts,
+                owner=owner,
+                repo=repo,
+                slug=slug,
+                metadata_content_file=metadata.content_file,
+                cli_content_type=metadata.content_type,
+                cli_source_identity=metadata_source_identity,
+                reason="validation_failed",
+            )
 
     if no_wait_for_sync:
         return slug_perm, slug
@@ -1408,8 +1426,14 @@ def create_push_handlers():  # noqa: C901
             # fanning it out across N packages (and validating + attaching it
             # N times) is almost never what the user wants. Force them to
             # push files individually with metadata, or drop the flags.
-            metadata_flags_set = any(metadata_kwargs.values())
-            sbom_flags_set = any(sbom_kwargs.values())
+            metadata_flags_set = any(
+                value is not None for value in metadata_kwargs.values()
+            )
+            sbom_flags_set = bool(sbom_kwargs["generate_sbom"]) or any(
+                value is not None
+                for key, value in sbom_kwargs.items()
+                if key != "generate_sbom"
+            )
             if metadata_flags_set and sbom_flags_set:
                 raise click.UsageError(
                     "--sbom cannot be combined with --metadata-content-file, "
