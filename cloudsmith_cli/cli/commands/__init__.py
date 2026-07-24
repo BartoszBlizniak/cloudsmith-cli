@@ -24,6 +24,7 @@ from . import (
     quota,
     repos,
     resync,
+    sbom,
     status,
     tags,
     tokens,
