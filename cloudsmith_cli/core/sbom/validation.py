@@ -86,6 +86,16 @@ def _json_path(error: ValidationError) -> str:
 
 def _validation_message(error: ValidationError) -> str:
     """Render bounded diagnostics without echoing arbitrary document values."""
+    if error.validator == "required":
+        missing = next(
+            (
+                name
+                for name in error.validator_value
+                if isinstance(error.instance, dict) and name not in error.instance
+            ),
+            None,
+        )
+        return f"{missing} is required" if missing else "a required property is missing"
     if error.validator == "enum":
         return "value is not one of the allowed values"
     if error.validator == "type":
@@ -94,7 +104,7 @@ def _validation_message(error: ValidationError) -> str:
         return "value does not match the required pattern"
     if error.validator == "format":
         return f"value does not match the required {error.validator_value} format"
-    return error.message
+    return "document violates a schema constraint"
 
 
 def validate_document(payload: dict[str, Any], output_format: str) -> None:

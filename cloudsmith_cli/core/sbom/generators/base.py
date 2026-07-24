@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from dataclasses import dataclass
@@ -50,8 +51,9 @@ class GeneratorVersion:
         """Parse the first semantic version in a generator's output."""
         match = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?\b", value)
         if not match:
+            detail = _redact_error(value[:MAX_ERROR_BYTES])
             raise GeneratorProviderError(
-                f"Could not determine the SBOM generator version from: {value.strip()!r}"
+                f"Could not determine the SBOM generator version from: {detail!r}"
             )
         raw = match.group(0).removeprefix("v")
         return cls(
@@ -242,7 +244,7 @@ def _run_bounded(
     command: list[str],
     *,
     environment: dict[str, str] | None,
-    timeout: int,
+    timeout: float,
     output_limit: int,
     error_limit: int,
 ) -> subprocess.CompletedProcess[bytes]:
@@ -258,6 +260,7 @@ def _run_bounded(
     if process.stdout is None or process.stderr is None:  # pragma: no cover
         process.kill()
         raise OSError("could not capture generator output")
+    deadline = time.monotonic() + timeout
 
     stdout = bytearray()
     stderr = bytearray()
@@ -293,12 +296,14 @@ def _run_bounded(
     for reader in readers:
         reader.start()
 
-    def finish_readers() -> None:
+    def finish_readers() -> bool:
         for reader in readers:
-            reader.join(timeout=1)
+            remaining = max(0.0, deadline - time.monotonic())
+            reader.join(timeout=remaining)
+        return all(not reader.is_alive() for reader in readers)
 
     try:
-        returncode = process.wait(timeout=timeout)
+        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
         with suppress(OSError):
             process.kill()
@@ -311,7 +316,13 @@ def _run_bounded(
             stderr=bytes(stderr),
         ) from exc
 
-    finish_readers()
+    if not finish_readers():
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=bytes(stdout),
+            stderr=bytes(stderr),
+        )
     if output_exceeded.is_set():
         raise _OutputLimitExceeded
     return subprocess.CompletedProcess(

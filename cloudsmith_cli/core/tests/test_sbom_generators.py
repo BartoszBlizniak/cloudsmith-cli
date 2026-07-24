@@ -3,12 +3,15 @@
 import os
 import subprocess
 import sys
+import threading
+import time
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
 
 from cloudsmith_cli.core.sbom.generators.base import (
+    MAX_ERROR_BYTES,
     GeneratorProviderError,
     GeneratorVersion,
     _OutputLimitExceeded,
@@ -36,6 +39,21 @@ def test_generator_version_parses_prerelease():
     assert version.release == (1, 49, 0)
     assert version.raw == "1.49.0-rc.1"
     assert version.prerelease is True
+
+
+def test_generator_version_error_is_bounded_and_redacted():
+    output = "token=super-secret " "https://user:password@example.invalid/version " + (
+        "x" * (MAX_ERROR_BYTES * 2)
+    )
+
+    with pytest.raises(GeneratorProviderError) as exc_info:
+        GeneratorVersion.parse(output)
+
+    message = str(exc_info.value)
+    assert "super-secret" not in message
+    assert "user:password" not in message
+    assert "https://" not in message
+    assert len(message) < MAX_ERROR_BYTES + 100
 
 
 @patch("cloudsmith_cli.core.sbom.generators.base._run_bounded")
@@ -91,7 +109,7 @@ def test_trivy_selects_image_and_keeps_json_on_stdout(mock_run):
 def test_trivy_rejects_cyclonedx_until_the_contract_accepts_17():
     with pytest.raises(
         GeneratorProviderError,
-        match="trivy does not support 'cyclonedx-json'.*spdx-json",
+        match=r"trivy does not support 'cyclonedx-json'.*spdx-json",
     ):
         TrivyGenerator("/opt/trivy").generate(".", "cyclonedx-json")
 
@@ -198,6 +216,22 @@ def test_auto_reports_each_incompatible_provider(mock_syft, mock_trivy):
     assert "trivy 0.71.0" in message
 
 
+@patch(
+    "cloudsmith_cli.core.sbom.generators.registry.TrivyGenerator.discover",
+    return_value=None,
+)
+@patch(
+    "cloudsmith_cli.core.sbom.generators.registry.SyftGenerator.discover",
+    return_value=None,
+)
+def test_auto_requires_an_installed_generator(_mock_syft, _mock_trivy):
+    with pytest.raises(
+        GeneratorProviderError,
+        match=r"No supported SBOM generator is installed\. Install Syft or Trivy\.",
+    ):
+        get_generator("auto", output_format="spdx-json")
+
+
 @patch("cloudsmith_cli.core.sbom.generators.base._run_bounded")
 def test_compatible_version_is_checked_once_per_provider(mock_run):
     mock_run.side_effect = [
@@ -277,6 +311,44 @@ def test_bounded_reader_enforces_timeout():
         )
 
 
+def test_bounded_reader_waits_for_stream_draining(monkeypatch):
+    real_thread = threading.Thread
+    reader_number = 0
+
+    def delayed_thread(*args, **kwargs):
+        nonlocal reader_number
+        delay = 1.1 if reader_number == 0 else 0
+        reader_number += 1
+        target = kwargs["target"]
+
+        def delayed_target(*target_args, **target_kwargs):
+            time.sleep(delay)
+            target(*target_args, **target_kwargs)
+
+        return real_thread(
+            *args,
+            target=delayed_target,
+            args=kwargs["args"],
+            kwargs=kwargs["kwargs"],
+            daemon=kwargs["daemon"],
+        )
+
+    monkeypatch.setattr(
+        "cloudsmith_cli.core.sbom.generators.base.threading.Thread",
+        delayed_thread,
+    )
+
+    completed_process = _run_bounded(
+        [sys.executable, "-c", "print('complete')"],
+        environment=None,
+        timeout=3,
+        output_limit=100,
+        error_limit=100,
+    )
+
+    assert completed_process.stdout == b"complete\n"
+
+
 @patch("cloudsmith_cli.core.sbom.generators.base._run_bounded")
 def test_truncates_generator_errors(mock_run):
     mock_run.side_effect = [
@@ -327,7 +399,7 @@ def test_cache_filesystem_failures_use_provider_error(tmp_path, monkeypatch):
     occupied.write_text("file", encoding="utf-8")
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(occupied))
 
-    with pytest.raises(GeneratorProviderError, match="Could not prepare.*syft cache"):
+    with pytest.raises(GeneratorProviderError, match=r"Could not prepare.*syft cache"):
         SyftGenerator.cache_directory("syft")
 
 
