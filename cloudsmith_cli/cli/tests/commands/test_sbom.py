@@ -102,7 +102,7 @@ def test_sbom_help_describes_generator_and_raw_output_contract():
     assert "The generator must be installed" in result.output
     assert "PATH." in result.output
     assert "'auto' prefers Syft" in result.output
-    assert "installed, qualified provider" in result.output
+    assert "installed, compatible generator" in result.output
     assert "'-' for stdout" in result.output
 
 
@@ -755,3 +755,27 @@ def test_add_renders_clear_permission_error(
     assert result.exit_code != 0
     assert "Could not attach SBOM" in result.output
     assert "Permission denied" in result.output
+
+
+@patch(
+    "cloudsmith_cli.cli.commands.sbom.create_metadata",
+    side_effect=ApiException(status=413, detail="Request entity too large"),
+)
+@patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+def test_add_explains_oversized_sbom(
+    _mock_resolve, mock_list, _mock_validate, _mock_create, tmp_path
+):
+    mock_list.return_value = ([], _empty_page_info())
+    sbom_file = tmp_path / "bom.json"
+    sbom_file.write_text(json.dumps(SPDX_SBOM), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        sbom_,
+        ["add", "org/repo/example", "--file", str(sbom_file)],
+    )
+
+    assert result.exit_code != 0
+    assert "Could not attach SBOM" in result.output
+    assert "size limit of about 5 MiB" in result.output

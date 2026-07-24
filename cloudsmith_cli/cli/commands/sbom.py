@@ -19,6 +19,7 @@ from ...core.api.packages import PackageResolutionError, package_sha256, resolve
 from ...core.pagination import PageInfo, paginate_results
 from ...core.sbom import (
     CLOUDSMITH_SBOM_CONTENT_TYPE,
+    SBOM_METADATA_SIZE_LIMIT_HINT,
     SbomError,
     generate_sbom as generate_sbom_document,
     normalize_sha256,
@@ -212,8 +213,8 @@ def sbom_(ctx, opts):  # pylint: disable=unused-argument
     show_default=True,
     help=(
         "External generator must be installed on PATH. 'auto' prefers Syft, "
-        "then falls back to another installed, qualified provider that supports "
-        "the requested format."
+        "then falls back to another installed, compatible generator that "
+        "supports the requested format."
     ),
 )
 @click.option(
@@ -357,16 +358,23 @@ def add_sbom(
         )
         created = entry is None
         if created:
-            validate_metadata(
-                content=payload,
-                content_type=CLOUDSMITH_SBOM_CONTENT_TYPE,
-            )
-            entry = create_metadata(
-                package["slug_perm"],
-                content=payload,
-                content_type=CLOUDSMITH_SBOM_CONTENT_TYPE,
-                source_identity=source_identity,
-            )
+            try:
+                validate_metadata(
+                    content=payload,
+                    content_type=CLOUDSMITH_SBOM_CONTENT_TYPE,
+                )
+                entry = create_metadata(
+                    package["slug_perm"],
+                    content=payload,
+                    content_type=CLOUDSMITH_SBOM_CONTENT_TYPE,
+                    source_identity=source_identity,
+                )
+            except ApiException as exc:
+                if getattr(exc, "status", None) == 413:
+                    raise click.ClickException(
+                        f"Could not attach SBOM. {SBOM_METADATA_SIZE_LIMIT_HINT}"
+                    ) from exc
+                raise
 
     result = {"created": created, "metadata": entry, "package_sha256": digest}
     if not utils.maybe_print_as_json(opts, result):
@@ -448,7 +456,8 @@ def get_sbom(ctx, opts, owner_repo_package, metadata_slug_perm, output):
             entry = get_metadata(package["slug_perm"], metadata_slug_perm)
             if not _is_supported_sbom_entry(entry):
                 raise click.ClickException(
-                    "The requested metadata entry is not a supported SBOM."
+                    "The requested metadata entry is not a supported SBOM. "
+                    "Run sbom list to see the SBOM identifiers for this package."
                 )
             entries = [entry]
         else:
