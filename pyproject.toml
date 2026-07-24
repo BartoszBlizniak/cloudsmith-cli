@@ -43,6 +43,11 @@ dependencies = [
     "click-didyoumean>=0.0.3",
     "click-spinner>=0.1.7",
     "json5>=0.9.0",  # For parsing JSONC (JSON with comments) in VS Code settings
+    "jsonschema>=4.25,<5",  # Offline validation of bundled SBOM schemas
+    "referencing>=0.28.4,<1",  # Offline registry for bundled schema references
+    "rfc3339-validator>=0.1.4,<1",  # CycloneDX date-time format checks
+    "rfc3986-validator>=0.1.1,<1",  # CycloneDX URI format checks
+    "rfc3987-syntax>=1.1.0,<2",  # CycloneDX IRI format checks
     "cloudsmith-api>=2.0.25,<3.0",  # Compatible upto (but excluding) 3.0+
     "keyring>=25.4.1",
     "mcp==1.27.2",
