@@ -95,8 +95,11 @@ def _is_supported_sbom_entry(entry: dict) -> bool:
     """Recognize schema-valid documents attached by the typed SBOM workflow."""
     if entry.get("content_type") != CLOUDSMITH_SBOM_CONTENT_TYPE:
         return False
+    content = entry.get("content")
+    if not isinstance(content, dict):
+        return False
     try:
-        validate_sbom(entry.get("content") or {})
+        validate_sbom(content)
     except SbomError:
         return False
     return True

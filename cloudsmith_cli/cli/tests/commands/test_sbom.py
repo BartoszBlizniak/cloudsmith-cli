@@ -358,6 +358,51 @@ def test_list_ignores_sbom_shaped_metadata_with_an_untyped_content_type(
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+def test_list_ignores_typed_sbom_with_non_object_content(
+    _mock_resolve, mock_list_metadata
+):
+    mock_list_metadata.return_value = (
+        [
+            {
+                "slug_perm": "invalid-sbom",
+                "content_type": "application/vnd.cloudsmith.sbom+json",
+                "content": ["not", "an", "object"],
+            }
+        ],
+        _empty_page_info(),
+    )
+
+    result = CliRunner().invoke(
+        sbom_,
+        ["list", "-F", "json", "org/repo/example", "--page-all"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["data"] == []
+
+
+@patch("cloudsmith_cli.cli.commands.sbom.get_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+def test_get_rejects_typed_sbom_with_non_object_content(
+    _mock_resolve, mock_get_metadata
+):
+    mock_get_metadata.return_value = {
+        "slug_perm": "invalid-sbom",
+        "content_type": "application/vnd.cloudsmith.sbom+json",
+        "content": "not an object",
+    }
+
+    result = CliRunner().invoke(
+        sbom_,
+        ["get", "org/repo/example", "invalid-sbom", "--output", "-"],
+    )
+
+    assert result.exit_code == 1
+    assert "not a supported SBOM" in result.output
+
+
+@patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
 def test_list_honors_group_level_json_format(_mock_resolve, mock_list_metadata):
     entry = {
         "slug_perm": "sbom-1",
