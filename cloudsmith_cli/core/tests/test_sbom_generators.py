@@ -157,7 +157,7 @@ def test_auto_skips_installed_provider_that_cannot_emit_format(_mock_trivy, _moc
     "cloudsmith_cli.core.sbom.generators.registry.SyftGenerator.discover",
     return_value=SyftGenerator("/opt/syft"),
 )
-def test_auto_skips_unqualified_syft_and_uses_qualified_trivy(mock_syft, mock_trivy):
+def test_auto_skips_below_minimum_syft_and_uses_supported_trivy(mock_syft, mock_trivy):
     syft = mock_syft.return_value
     trivy = mock_trivy.return_value
     with (
@@ -165,7 +165,7 @@ def test_auto_skips_unqualified_syft_and_uses_qualified_trivy(mock_syft, mock_tr
             syft,
             "ensure_compatible",
             side_effect=GeneratorProviderError(
-                "syft 1.48.0 is not a qualified stable release."
+                "syft 1.48.0 is below the minimum supported 1.49.0."
             ),
         ) as mock_syft_compatible,
         patch.object(
@@ -196,14 +196,14 @@ def test_auto_reports_each_incompatible_provider(mock_syft, mock_trivy):
             syft,
             "ensure_compatible",
             side_effect=GeneratorProviderError(
-                "syft 1.48.0 is not a qualified stable release."
+                "syft 1.48.0 is below the minimum supported 1.49.0."
             ),
         ),
         patch.object(
             trivy,
             "ensure_compatible",
             side_effect=GeneratorProviderError(
-                "trivy 0.71.0 is not a qualified stable release."
+                "trivy 0.71.0 is below the minimum supported 0.72.0."
             ),
         ),
         pytest.raises(GeneratorProviderError) as error,
@@ -211,7 +211,7 @@ def test_auto_reports_each_incompatible_provider(mock_syft, mock_trivy):
         get_generator("auto", output_format="spdx-json")
 
     message = str(error.value)
-    assert "No compatible installed SBOM generator" in message
+    assert "No installed SBOM generator meets the minimum supported version" in message
     assert "syft 1.48.0" in message
     assert "trivy 0.71.0" in message
 
@@ -247,16 +247,30 @@ def test_compatible_version_is_checked_once_per_provider(mock_run):
     assert len(mock_run.call_args_list) == 2
 
 
-@pytest.mark.parametrize("version", ["1.48.0", "1.49.0-rc.1", "2.0.0"])
+@pytest.mark.parametrize("version", ["1.48.0", "0.9.0"])
 @patch("cloudsmith_cli.core.sbom.generators.base._run_bounded")
-def test_rejects_unqualified_or_prerelease_version(mock_run, version):
+def test_rejects_below_minimum_version(mock_run, version):
     mock_run.return_value = completed(f'{{"version":"{version}"}}')
 
     with pytest.raises(
         GeneratorProviderError,
-        match=rf"syft {version} is not a qualified stable release.*syft 1.49.0",
+        match=rf"syft {version} is below the minimum supported 1\.49\.0",
     ):
         SyftGenerator("/opt/syft").generate(".", "cyclonedx-json")
+
+
+@pytest.mark.parametrize("version", ["1.49.0-rc.1", "1.50.0", "2.0.0"])
+@patch("cloudsmith_cli.core.sbom.generators.base._run_bounded")
+def test_accepts_newer_or_prerelease_version_with_warning(mock_run, version, capsys):
+    mock_run.side_effect = [
+        completed(f'{{"version":"{version}"}}'),
+        completed('{"bomFormat":"CycloneDX","specVersion":"1.6"}'),
+    ]
+
+    result = SyftGenerator("/opt/syft").generate(".", "cyclonedx-json")
+
+    assert result.generator_version == version
+    assert "newer than the tested 1.49.0" in capsys.readouterr().err
 
 
 @patch("cloudsmith_cli.core.sbom.generators.base._run_bounded")

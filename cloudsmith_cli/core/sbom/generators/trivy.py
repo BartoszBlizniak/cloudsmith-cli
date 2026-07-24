@@ -17,9 +17,10 @@ class TrivyGenerator(ExternalGenerator):
 
     name = "trivy"
     executable_name = "trivy"
-    qualified_versions = frozenset({(0, 72, 0)})
+    minimum_version = (0, 72, 0)
+    tested_version = (0, 72, 0)
     # Trivy 0.72 emits CycloneDX 1.7, while the Build Insights contract accepts
-    # CycloneDX 1.6. Qualify current Trivy through its SPDX 2.3 output instead.
+    # CycloneDX 1.6. Support current Trivy through its SPDX 2.3 output instead.
     supported_formats = frozenset({SPDX_JSON})
 
     def version(self) -> GeneratorVersion:

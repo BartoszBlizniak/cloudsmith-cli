@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import click
+
 from cloudsmith_cli.core.sbom.contracts import SBOM_FORMATS
 
 GENERATION_TIMEOUT_SECONDS = 300
@@ -30,6 +32,11 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|authorization|credential|password|secret|token)"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
+
+
+def _format_version(release: tuple[int, int, int]) -> str:
+    """Render a release tuple as a dotted version string."""
+    return ".".join(str(part) for part in release)
 
 
 class GeneratorProviderError(Exception):
@@ -84,7 +91,8 @@ class ExternalGenerator(ABC):
 
     name: str
     executable_name: str
-    qualified_versions: frozenset[tuple[int, int, int]]
+    minimum_version: tuple[int, int, int]
+    tested_version: tuple[int, int, int]
     supported_formats = frozenset(SBOM_FORMATS)
 
     def __init__(self, executable: str):
@@ -131,19 +139,28 @@ class ExternalGenerator(ABC):
         )
 
     def ensure_compatible(self) -> GeneratorVersion:
-        """Return the detected version or require a stable qualified release."""
+        """Return the detected version, requiring at least the minimum release.
+
+        Versions below the tested minimum are rejected. Newer or prerelease
+        versions are accepted with a warning, so routine upstream releases do
+        not block generation or require a CLI update.
+        """
         if self._compatible_version is not None:
             return self._compatible_version
 
         version = self.version()
-        if version.prerelease or version.release not in self.qualified_versions:
-            qualified = ", ".join(
-                ".".join(str(part) for part in release)
-                for release in sorted(self.qualified_versions)
-            )
+        if version.release < self.minimum_version:
+            minimum = _format_version(self.minimum_version)
             raise GeneratorProviderError(
-                f"{self.name} {version.raw} is not a qualified stable release. "
-                f"Install {self.name} {qualified}."
+                f"{self.name} {version.raw} is below the minimum supported "
+                f"{minimum}. Update {self.name} or select another generator."
+            )
+        if version.prerelease or version.release > self.tested_version:
+            tested = _format_version(self.tested_version)
+            click.echo(
+                f"Warning: {self.name} {version.raw} is newer than the tested "
+                f"{tested}; SBOM output may differ.",
+                err=True,
             )
         self._compatible_version = version
         return version

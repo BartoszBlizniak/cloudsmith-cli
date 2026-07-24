@@ -18,7 +18,8 @@ class SyftGenerator(ExternalGenerator):
 
     name = "syft"
     executable_name = "syft"
-    qualified_versions = frozenset({(1, 49, 0)})
+    minimum_version = (1, 49, 0)
+    tested_version = (1, 49, 0)
 
     def version(self) -> GeneratorVersion:
         completed = self._run(

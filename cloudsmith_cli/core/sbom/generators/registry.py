@@ -45,7 +45,7 @@ def get_generator(name: str, output_format: str | None = None) -> ExternalGenera
             details = "; ".join(compatibility_errors)
             format_scope = f" for '{output_format}'" if output_format else ""
             raise GeneratorProviderError(
-                "No compatible installed SBOM generator is qualified"
+                "No installed SBOM generator meets the minimum supported version"
                 f"{format_scope}. {details}"
             )
         if installed and output_format is not None and not format_supported:

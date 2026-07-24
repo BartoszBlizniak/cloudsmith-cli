@@ -18,6 +18,14 @@ from .validation import SbomValidationError, validate_document
 CLOUDSMITH_SBOM_CONTENT_TYPE = "application/vnd.cloudsmith.sbom+json"
 DEFAULT_SBOM_SOURCE_IDENTITY = "cli:syft"
 
+# Package metadata is capped at roughly 5 MiB server-side; larger SBOMs are
+# rejected with HTTP 413. Surfaced to users so an oversized document produces
+# actionable guidance instead of a raw transport error.
+SBOM_METADATA_SIZE_LIMIT_HINT = (
+    "The SBOM exceeds the package metadata size limit of about 5 MiB. "
+    "Reduce the scan scope, or store the document out-of-band."
+)
+
 
 class SbomError(Exception):
     """Base exception for local SBOM failures."""
