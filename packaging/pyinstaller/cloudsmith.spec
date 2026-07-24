@@ -17,6 +17,7 @@ datas += collect_data_files(
     includes=["data/*", "templates/*"],
 )
 datas += collect_data_files("mcp", includes=["py.typed"])
+datas += collect_data_files("rfc3987_syntax", includes=["*.lark"])
 
 # mcp.cli imports the optional `typer` dependency. Keep mcp.client and exclude
 # only the CLI package itself and its descendants.
