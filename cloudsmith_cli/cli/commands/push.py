@@ -32,6 +32,7 @@ from ...core.api.packages import (
 from ...core.sbom import (
     CLOUDSMITH_SBOM_CONTENT_TYPE,
     DEFAULT_SBOM_SOURCE_IDENTITY,
+    SBOM_METADATA_SIZE_LIMIT_HINT,
     SbomError,
     generate_sbom_details,
 )
@@ -449,6 +450,8 @@ def validate_metadata_payload(
             )
         else:
             message = f"Metadata content failed validation: {detail}"
+        if http_status == 413 and content_type == CLOUDSMITH_SBOM_CONTENT_TYPE:
+            message = f"{message} {SBOM_METADATA_SIZE_LIMIT_HINT}"
         failure_info = {
             "status": "validation_failed",
             "http_status": http_status,
@@ -539,6 +542,8 @@ def attach_metadata_to_package(
             )
         else:
             message = f"Could not attach metadata to package {slug_perm}: {detail}"
+        if http_status == 413 and content_type == CLOUDSMITH_SBOM_CONTENT_TYPE:
+            message = f"{message} {SBOM_METADATA_SIZE_LIMIT_HINT}"
         failure_info = {
             "status": "attach_failed",
             "http_status": http_status,
@@ -1357,8 +1362,8 @@ def create_push_handlers():  # noqa: C901
             default=None,
             help=(
                 "External generator on PATH. Defaults to syft; 'auto' prefers "
-                "Syft, then falls back to another installed, qualified provider "
-                "that supports the requested format."
+                "Syft, then falls back to another installed, compatible "
+                "generator that supports the requested format."
             ),
         )
         @click.option(
