@@ -1,6 +1,7 @@
 """CLI - Validators."""
 
 import base64
+import re
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -13,6 +14,21 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 BAD_API_HEADERS = ("user-agent", "host")
 API_HEADER_TRANSFORMS = {}
 PUBLIC_API_HOST_SUFFIXES = ("cloudsmith.io", "cloudsmith.com")
+
+
+def validate_sha256_digest(ctx, param, value):
+    """Normalize an optional SHA-256 digest and render invalid values as usage errors."""
+    # pylint: disable=unused-argument
+    if value is None:
+        return None
+    digest = value.strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise click.BadParameter(
+            "subject digest must be a 64-character SHA-256 value", param=param
+        )
+    return digest
 
 
 class IntOrWildcard(click.ParamType):

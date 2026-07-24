@@ -1,6 +1,7 @@
 """API - Packages endpoints."""
 
 import inspect
+import re
 
 import cloudsmith_api
 from cloudsmith_api.models import PackageQuarantineRequest
@@ -9,6 +10,10 @@ from .. import ratelimits, utils
 from ..pagination import PageInfo
 from .exceptions import catch_raise_api_exception
 from .init import get_api_client
+
+
+class PackageResolutionError(ValueError):
+    """Raised when a resolved package has no immutable SHA-256 digest."""
 
 
 def get_packages_api():
@@ -231,6 +236,39 @@ def get_package_slug_perm(owner, repo, identifier):
 
     # pylint: disable=no-member
     return data.slug_perm
+
+
+def get_package(owner, repo, identifier):
+    """Retrieve a package detail representation as a dictionary."""
+    client = get_packages_api()
+
+    with catch_raise_api_exception():
+        data, _, headers = client.packages_read_with_http_info(
+            owner=owner, repo=repo, identifier=identifier
+        )
+
+    ratelimits.maybe_rate_limit(client, headers)
+    return data.to_dict()
+
+
+def package_sha256(package):
+    """Extract the immutable SHA-256 digest from a package representation."""
+    for key in ("checksum_sha256", "sha256", "digest_sha256"):
+        value = package.get(key)
+        if value:
+            digest = str(value).strip().lower()
+            if digest.startswith("sha256:"):
+                digest = digest.removeprefix("sha256:")
+            if re.fullmatch(r"[0-9a-f]{64}", digest):
+                return digest
+    raise PackageResolutionError("Resolved package does not expose a SHA-256 digest.")
+
+
+def resolve_package(owner, repo, identifier):
+    """Resolve one package and require an immutable SHA-256 digest."""
+    package = get_package(owner, repo, identifier)
+    package_sha256(package)
+    return package
 
 
 def list_packages(owner, repo, **kwargs):
