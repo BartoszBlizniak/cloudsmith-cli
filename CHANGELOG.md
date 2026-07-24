@@ -9,12 +9,19 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Added
 
+- Added `cloudsmith sbom generate`, `add`, `list` (`ls`), and `get` for
+  CycloneDX JSON 1.6 and SPDX JSON 2.3 documents, plus `--sbom` generation and
+  attachment on every format-specific `cloudsmith push` command. Generation
+  uses version-qualified external Syft or Trivy providers, while imported and
+  generated documents are validated offline against bundled official schemas.
 - Standalone, self-contained CLI binaries built with PyInstaller for Linux (x86_64/aarch64, glibc and musl), macOS (arm64/x86_64) and Windows (x86_64). Each release attaches the per-platform archives and SHA256 checksums to the GitHub release and pushes them to Cloudsmith. The binaries bundle Python and all native dependencies, so no Python installation is required.
 - Linux binary archives are GPG-signed. Each `cloudsmith-<version>-linux-*.tar.gz` ships a detached `.sig` alongside it, verifiable with `gpg --verify` against the published Cloudsmith CLI signing key.
 - Released binaries are tagged on Cloudsmith by platform — `os`, `arch`, `libc` (Linux), the full target, and a type tag (`standalone-binary`/`signature`) — so CI/CD can select the right artifact via the package query API, for example `version:1.19.0 AND tag:standalone-binary AND tag:linux AND tag:x86_64 AND tag:musl`.
 
 ### Changed
 
+- Standalone SBOM imports now use the neutral `cli:imported` source identity by
+  default; `cli:syft` is recorded only when the CLI actually invokes Syft.
 - The official Docker image now ships the standalone musl binary on a plain Alpine base instead of the Python zipapp — the image no longer contains a Python runtime.
 - The Docker image now carries standard OCI labels (`org.opencontainers.image.*`: source, version, revision, licenses); the Docker Hub image additionally publishes the conventional floating tags (`latest`, major, and major.minor).
 
