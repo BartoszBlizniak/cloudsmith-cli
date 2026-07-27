@@ -428,7 +428,7 @@ def list_sboms(ctx, opts, owner_repo_package, page, page_size, page_all):
     metavar="OWNER/REPO/PACKAGE",
     callback=validators.validate_owner_repo_package,
 )
-@click.argument("metadata_slug_perm", required=False)
+@click.argument("metadata_slug_perm")
 @click.option(
     "--output",
     type=click.Path(dir_okay=False, allow_dash=True),
@@ -437,14 +437,15 @@ def list_sboms(ctx, opts, owner_repo_package, page, page_size, page_all):
 @click.pass_context
 def get_sbom(ctx, opts, owner_repo_package, metadata_slug_perm, output):
     """
-    Retrieve package SBOMs, optionally selecting one metadata entry.
+    Retrieve one SBOM attached to a package.
 
-    Without METADATA_SLUG_PERM, all SBOM entries are returned. Select one entry
-    to use --output; raw output cannot be combined with JSON -F modes.
+    METADATA_SLUG_PERM selects the entry; run sbom list to see the identifiers
+    for a package. Use --output to write the raw document; raw output cannot be
+    combined with JSON -F modes.
 
     \b
     Examples:
-        $ cloudsmith sbom get your-org/your-repo/your-pkg -F pretty_json
+        $ cloudsmith sbom get your-org/your-repo/your-pkg meta-slug -F pretty_json
         $ cloudsmith sbom get your-org/your-repo/your-pkg meta-slug --output -
     """
     _inherit_parent_output_format(ctx, opts)
@@ -452,27 +453,14 @@ def get_sbom(ctx, opts, owner_repo_package, metadata_slug_perm, output):
     owner, repo, identifier = owner_repo_package
     with _handle_sbom_api_exceptions(ctx, opts, "Could not retrieve SBOM."):
         package = _resolve_package(owner, repo, identifier)
-        if metadata_slug_perm:
-            entry = get_metadata(package["slug_perm"], metadata_slug_perm)
-            if not _is_supported_sbom_entry(entry):
-                raise click.ClickException(
-                    "The requested metadata entry is not a supported SBOM. "
-                    "Run sbom list to see the SBOM identifiers for this package."
-                )
-            entries = [entry]
-        else:
-            entries, _ = _list_sbom_entries(package["slug_perm"], page_all=True)
+        entry = get_metadata(package["slug_perm"], metadata_slug_perm)
+        if not _is_supported_sbom_entry(entry):
+            raise click.ClickException(
+                "The requested metadata entry is not a supported SBOM. "
+                "Run sbom list to see the SBOM identifiers for this package."
+            )
 
     if output is not None:
-        if len(entries) != 1:
-            raise click.UsageError(
-                "--output requires exactly one SBOM. Pass its metadata identifier "
-                "when the package has zero or multiple SBOMs."
-            )
-        _write_raw_json(entries[0]["content"], output)
-    elif metadata_slug_perm:
-        if not utils.maybe_print_as_json(opts, entries[0]):
-            click.echo(json.dumps(entries[0], indent=2, sort_keys=True))
-    elif not utils.maybe_print_as_json(opts, entries):
-        for entry in entries:
-            click.echo(json.dumps(entry, indent=2, sort_keys=True))
+        _write_raw_json(entry["content"], output)
+    elif not utils.maybe_print_as_json(opts, entry):
+        click.echo(json.dumps(entry, indent=2, sort_keys=True))

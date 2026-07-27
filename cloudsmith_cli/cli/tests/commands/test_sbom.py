@@ -497,45 +497,35 @@ def test_list_pretty_output_has_clear_empty_state(_mock_resolve, mock_list_metad
     assert result.output.strip() == "Results: 0 SBOMs visible"
 
 
-@patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
-def test_get_by_package_returns_empty_json_data(_mock_resolve, mock_list_metadata):
-    mock_list_metadata.return_value = ([], _empty_page_info())
-
+def test_get_requires_a_metadata_slug():
     result = CliRunner().invoke(
         sbom_,
-        ["get", "-F", "json", "org/repo/example"],
+        ["get", "org/repo/example"],
     )
 
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == {"data": []}
+    assert result.exit_code != 0
+    assert "Missing argument" in result.output
 
 
-@patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.get_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
-def test_get_by_package_returns_full_supported_entries(
-    _mock_resolve, mock_list_metadata
-):
+def test_get_returns_the_selected_entry_as_json(_mock_resolve, mock_get_metadata):
     entry = {
         "slug_perm": "meta123",
         "created_at": "2026-07-23T12:00:00Z",
-        "source_identity": "cli:syft",
+        "source_identity": "cli:imported",
         "content_type": "application/vnd.cloudsmith.sbom+json",
-        "content": {
-            "bomFormat": "CycloneDX",
-            "specVersion": "1.6",
-            "version": 1,
-        },
+        "content": SPDX_SBOM,
     }
-    mock_list_metadata.return_value = ([entry], _empty_page_info())
+    mock_get_metadata.return_value = entry
 
     result = CliRunner().invoke(
         sbom_,
-        ["get", "-F", "json", "org/repo/example"],
+        ["get", "-F", "json", "org/repo/example", "meta123"],
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["data"] == [entry]
+    assert json.loads(result.stdout)["data"] == entry
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
