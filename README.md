@@ -95,6 +95,11 @@ The CLI currently supports the following commands (and sub-commands):
   - `update`:               Update a repository in a namespace.
   - `delete`|`rm`:          Delete a repository from a namespace.
 - `resync`:               Resynchronise a package in a repository.
+- `sbom`:                 Generate and manage package software bills of materials.
+  - `generate`:             Generate a CycloneDX or SPDX SBOM with an external generator.
+  - `add`:                  Validate and attach an SBOM to an existing package.
+  - `list`|`ls`:            List SBOMs attached to a package.
+  - `get`:                  Retrieve SBOM metadata or write one SBOM document.
 - `status`:               Get the synchronisation status for a package.
 - `tags`|`tag`:           Manage the tags for a package in a repository.
   - `add`:                  Add tags to a package in a repository.
@@ -473,6 +478,51 @@ For all available options:
 ```
 cloudsmith metadata --help
 ```
+
+
+## Software Bills of Materials
+
+Use `cloudsmith sbom` to generate, attach, list, and retrieve CycloneDX JSON 1.6
+or SPDX JSON 2.3 documents. The CLI validates each document against its official
+schema and binds attachments to the resolved package SHA-256.
+
+Generation requires a supported external tool on `PATH`: Syft v1.49.0 for
+CycloneDX or SPDX, or Trivy v0.72.0 for SPDX. `--generator auto` selects the
+first installed, compatible tool.
+
+### Generate or attach separately
+
+`sbom generate` runs locally and writes raw JSON to a file or stdout:
+
+```
+cloudsmith sbom generate . --output sbom.cdx.json
+cloudsmith sbom generate . --format spdx-json --output -
+```
+
+Attach an existing document to a package:
+
+```
+cloudsmith sbom add your-org/your-repo/your-pkg \
+  --file sbom.cdx.json \
+  --subject-digest sha256:PACKAGE_DIGEST
+```
+
+`--subject-digest` is recommended in automation. Imported documents use
+`cli:imported` as their source identity; set `--source-identity` when the
+producer is known.
+
+### List or retrieve
+
+```
+cloudsmith sbom list your-org/your-repo/your-pkg
+cloudsmith sbom get your-org/your-repo/your-pkg -F pretty_json
+cloudsmith sbom get your-org/your-repo/your-pkg metadata-slug-perm \
+  --output sbom.json
+```
+
+`list` supports the standard pagination options. JSON modes use the existing
+`{"data": ...}` envelope, while `--output FILE|-` writes only the selected SBOM.
+Run `cloudsmith sbom --help` for all options.
 
 
 ## Attaching Metadata During Push
