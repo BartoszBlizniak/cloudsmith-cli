@@ -276,6 +276,13 @@ jobs:
           set -euo pipefail
           cloudsmith whoami
 
+      - name: Install Syft for push-time SBOM generation
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/v1.49.0/install.sh \
+            | sh -s -- -b /usr/local/bin v1.49.0
+          syft version
+
       - name: Publish binaries and Python distributions
         run: |
           set -euo pipefail
@@ -291,7 +298,7 @@ jobs:
 
           push_raw_if_absent() {
             # Args: <namespace/repo> <file> <package-name> <comma-separated-tags>
-            local repo="$1" file="$2" name="$3" tags="$4"
+            local repo="$1" file="$2" name="$3" tags="$4" sbom="${5:-}"
             local base
             base="$(basename "${file}")"
             if [ "$(package_count "${repo}" "${base}")" != "0" ]; then
@@ -303,7 +310,8 @@ jobs:
               "${file}" \
               --name "${name}" \
               --version "${VERSION}" \
-              --tags "${tags}"
+              --tags "${tags}" \
+              ${sbom}
           }
 
           push_python_if_absent() {
@@ -317,7 +325,8 @@ jobs:
             fi
             cloudsmith push python \
               "${repo}" \
-              "${file}"
+              "${file}" \
+              --sbom
           }
 
           package_version_count() {
@@ -370,7 +379,8 @@ jobs:
               "${CLOUDSMITH_NAMESPACE}/${CLOUDSMITH_REPO}" \
               "${ARCHIVE}" \
               "cloudsmith-cli-${TARGET}" \
-              "standalone-binary,${COMMON}"
+              "standalone-binary,${COMMON}" \
+              "--sbom"
             case "${TARGET}" in
               linux-*)
                 test -f "${ARCHIVE}.sig"
