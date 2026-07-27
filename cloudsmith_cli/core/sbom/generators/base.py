@@ -105,7 +105,9 @@ class ExternalGenerator(ABC):
         executable = shutil.which(cls.executable_name)
         return cls(executable) if executable else None
 
-    def generate(self, source: str, output_format: str) -> GeneratedSbom:
+    def generate(
+        self, source: str, output_format: str, source_type: str = "auto"
+    ) -> GeneratedSbom:
         """Check compatibility, execute the tool, and decode its JSON output."""
         if output_format not in self.supported_formats:
             supported = ", ".join(sorted(self.supported_formats))
@@ -115,7 +117,7 @@ class ExternalGenerator(ABC):
             )
 
         version = self.ensure_compatible()
-        command = self.build_command(source, output_format)
+        command = self.build_command(source, output_format, source_type)
         completed = self._run(
             command,
             timeout=GENERATION_TIMEOUT_SECONDS,
@@ -180,7 +182,9 @@ class ExternalGenerator(ABC):
         """Detect the installed generator version."""
 
     @abstractmethod
-    def build_command(self, source: str, output_format: str) -> list[str]:
+    def build_command(
+        self, source: str, output_format: str, source_type: str = "auto"
+    ) -> list[str]:
         """Build the generation command."""
 
     def _run(

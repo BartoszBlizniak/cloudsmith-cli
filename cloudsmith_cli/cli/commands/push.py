@@ -31,13 +31,19 @@ from ...core.api.packages import (
 )
 from ...core.sbom import (
     CLOUDSMITH_SBOM_CONTENT_TYPE,
-    DEFAULT_SBOM_SOURCE_IDENTITY,
     SBOM_METADATA_SIZE_LIMIT_HINT,
     SbomError,
+    ensure_within_metadata_size,
     generate_sbom_details,
 )
-from ...core.sbom.contracts import DEFAULT_SBOM_FORMAT, SBOM_FORMATS
-from ...core.sbom.generators import AUTO_GENERATOR, DEFAULT_GENERATOR, GENERATOR_NAMES
+from ...core.sbom.contracts import (
+    DEFAULT_SBOM_FORMAT,
+    SBOM_FORMATS,
+    SOURCE_TYPE_AUTO,
+    SOURCE_TYPES,
+    SPDX_JSON,
+)
+from ...core.sbom.generators import DEFAULT_GENERATOR, GENERATOR_NAMES
 from .. import command, decorators, utils, validators
 from ..exceptions import handle_api_exceptions
 from ..metadata_common import (
@@ -52,6 +58,8 @@ from ..metadata_common import (
 from ..types import ExpandPath
 from ..utils import maybe_spinner
 from .main import main
+
+TRIVY_GENERATOR = "trivy"
 
 #: Env var that lets CI/CD wrappers (e.g. GHA) opt out of hard-failing the
 #: push when push-time metadata attachment fails. Defaults to ``error`` so an
@@ -77,6 +85,7 @@ SBOM_KWARG_NAMES = (
     "sbom_source",
     "sbom_generator",
     "sbom_format",
+    "sbom_source_type",
     "sbom_source_identity",
 )
 #: Click dest name for ``--on-metadata-failure``. Popped off the push kwargs
@@ -148,6 +157,7 @@ def resolve_push_sbom_options(
     sbom_generator=None,
     sbom_format=None,
     sbom_source_identity=None,
+    sbom_source_type=None,
     opts=None,
 ):
     """Generate and resolve the metadata payload for ``push --sbom``."""
@@ -156,6 +166,12 @@ def resolve_push_sbom_options(
         "--sbom-generator": sbom_generator,
         "--sbom-format": sbom_format,
         "--sbom-source-identity": sbom_source_identity,
+        # A default 'auto' does not count as "supplied" for the guard below.
+        "--sbom-source-type": (
+            sbom_source_type
+            if sbom_source_type not in (None, SOURCE_TYPE_AUTO)
+            else None
+        ),
     }
     if not generate_sbom:
         supplied = [name for name, value in custom_options.items() if value is not None]
@@ -169,19 +185,23 @@ def resolve_push_sbom_options(
 
     source = sbom_source or "."
     generator = sbom_generator or DEFAULT_GENERATOR
-    output_format = sbom_format or DEFAULT_SBOM_FORMAT
-    source_identity = sbom_source_identity or (
-        DEFAULT_SBOM_SOURCE_IDENTITY
-        if generator in {AUTO_GENERATOR, DEFAULT_GENERATOR}
-        else f"cli:{generator}"
+    source_type = sbom_source_type or SOURCE_TYPE_AUTO
+    # Trivy only emits SPDX here, so the CycloneDX default would fail; pick SPDX
+    # when the format was left unset. An explicit --sbom-format is respected.
+    output_format = sbom_format or (
+        SPDX_JSON if generator == TRIVY_GENERATOR else DEFAULT_SBOM_FORMAT
     )
+    source_identity = sbom_source_identity or f"cli:{generator}"
 
     try:
         generated = generate_sbom_details(
             source,
             generator=generator,
             output_format=output_format,
+            source_type=source_type,
         )
+        # Fail fast before upload rather than a 413 after a multi-minute scan.
+        ensure_within_metadata_size(generated.payload)
     except SbomError as exc:
         if not _metadata_failure_is_warn(opts):
             raise click.ClickException(str(exc)) from exc
@@ -197,7 +217,9 @@ def resolve_push_sbom_options(
         )
 
     selected_generator = generated.generator
-    source_identity = sbom_source_identity or f"cli:{selected_generator}"
+    source_identity = sbom_source_identity or (
+        f"cli:{selected_generator}@{generated.generator_version}"
+    )
     return (
         ResolvedMetadata(
             provided=True,
@@ -1370,14 +1392,26 @@ def create_push_handlers():  # noqa: C901
             "--sbom-format",
             type=click.Choice(SBOM_FORMATS),
             default=None,
-            help="Generated SBOM format. Defaults to cyclonedx-json.",
+            help=(
+                "Generated SBOM format. Defaults to cyclonedx-json "
+                "(spdx-json when the generator is trivy)."
+            ),
+        )
+        @click.option(
+            "--sbom-source-type",
+            type=click.Choice(SOURCE_TYPES),
+            default=SOURCE_TYPE_AUTO,
+            help=(
+                "How to interpret the scan source. 'auto' infers directory vs "
+                "image; use 'image' to scan a local image archive as an image."
+            ),
         )
         @click.option(
             "--sbom-source-identity",
             default=None,
             help=(
                 "Identifier describing where the SBOM originated. Defaults to "
-                "'cli:<selected-generator>'."
+                "'cli:<selected-generator>@<version>'."
             ),
         )
         @click.option(

@@ -40,7 +40,11 @@ class SyftGenerator(ExternalGenerator):
             )
         return GeneratorVersion.parse(value)
 
-    def build_command(self, source: str, output_format: str) -> list[str]:
+    def build_command(
+        self, source: str, output_format: str, source_type: str = "auto"
+    ) -> list[str]:
+        # Syft auto-detects directory/archive/image sources, so source_type is
+        # accepted for interface parity but not needed here.
         output = {
             CYCLONEDX_JSON: "cyclonedx-json@1.6",
             SPDX_JSON: "spdx-json@2.3",

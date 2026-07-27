@@ -31,11 +31,24 @@ class TrivyGenerator(ExternalGenerator):
         )
         return GeneratorVersion.parse(completed.stdout)
 
-    def build_command(self, source: str, output_format: str) -> list[str]:
+    def build_command(
+        self, source: str, output_format: str, source_type: str = "auto"
+    ) -> list[str]:
         output = {
             CYCLONEDX_JSON: "cyclonedx",
             SPDX_JSON: "spdx-json",
         }[output_format]
+        if source_type == "directory":
+            return [self.executable, "fs", "--format", output, source]
+        if source_type == "image":
+            # A local image archive needs --input; a registry/daemon reference
+            # is passed positionally. Path existence disambiguates the two.
+            if Path(source).exists():
+                return [self.executable, "image", "--input", source, "--format", output]
+            return [self.executable, "image", "--format", output, source]
+        # auto: a filesystem path if it exists, otherwise an image reference.
+        # Note: a local image archive is scanned as a filesystem here; pass
+        # --sbom-source-type image to scan it as an image instead.
         scan_kind = "fs" if Path(source).exists() else "image"
         return [self.executable, scan_kind, "--format", output, source]
 

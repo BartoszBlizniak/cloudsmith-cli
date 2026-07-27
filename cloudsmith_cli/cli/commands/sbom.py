@@ -11,21 +11,29 @@ from click.core import ParameterSource
 from ...core.api.exceptions import ApiException
 from ...core.api.metadata import (
     create_metadata,
+    delete_metadata,
     get_metadata,
     list_metadata,
     validate_metadata,
 )
-from ...core.api.packages import PackageResolutionError, package_sha256, resolve_package
+from ...core.api.packages import PackageResolutionError, get_package, package_sha256
 from ...core.pagination import PageInfo, paginate_results
 from ...core.sbom import (
     CLOUDSMITH_SBOM_CONTENT_TYPE,
     SBOM_METADATA_SIZE_LIMIT_HINT,
     SbomError,
+    ensure_within_metadata_size,
     generate_sbom as generate_sbom_document,
     normalize_sha256,
     validate_sbom,
 )
-from ...core.sbom.contracts import DEFAULT_SBOM_FORMAT, SBOM_FORMATS
+from ...core.sbom.contracts import (
+    DEFAULT_SBOM_FORMAT,
+    SBOM_FORMATS,
+    SOURCE_TYPE_AUTO,
+    SOURCE_TYPES,
+    SPDX_JSON,
+)
 from ...core.sbom.generators import DEFAULT_GENERATOR, GENERATOR_NAMES
 from .. import command, decorators, utils, validators
 from ..exceptions import handle_api_exceptions
@@ -33,8 +41,9 @@ from ..metadata_common import resolve_metadata_content
 from .main import main
 
 DEFAULT_IMPORTED_SBOM_SOURCE_IDENTITY = "cli:imported"
+TRIVY_GENERATOR = "trivy"
 
-_SBOM_HEADERS = ["Slug", "Content type", "Source identity", "Created"]
+_SBOM_HEADERS = ["Slug", "Format", "Components", "Source identity", "Created"]
 
 
 class _SbomPageInfo(PageInfo):
@@ -60,10 +69,11 @@ def _handle_sbom_api_exceptions(ctx, opts, context_msg):
         ):
             yield
     except ApiException as exc:
-        # AliasGroup runs Click in non-standalone mode and converts
-        # click.Exit into a successful return value. SystemExit preserves the
-        # API status without asking AliasGroup to render a second JSON error.
-        raise SystemExit(exc.status or 1) from exc
+        # AliasGroup runs Click in non-standalone mode and converts click.Exit
+        # into a successful return value, so exit explicitly. Use a stable 1 --
+        # an HTTP status is not a valid process exit code (it wraps mod 256, so
+        # e.g. 404 -> 148); the JSON error envelope already carries the status.
+        raise SystemExit(1) from exc
 
 
 def _write_raw_json(payload: dict, output: str) -> None:
@@ -107,11 +117,46 @@ def _is_supported_sbom_entry(entry: dict) -> bool:
 
 
 def _resolve_package(owner: str, repo: str, identifier: str) -> dict:
-    """Resolve a digest-bound package and render local resolution failures."""
+    """Resolve a package for read/attach operations.
+
+    Reads and attaches never need the package digest, so unlike the digest-bound
+    resolver this does not require one — only ``add --subject-digest`` verifies a
+    digest, and it does so explicitly.
+    """
+    return get_package(owner, repo, identifier)
+
+
+def _optional_package_digest(package: dict) -> str | None:
+    """Return the package SHA-256 digest, or None when it exposes none."""
     try:
-        return resolve_package(owner, repo, identifier)
-    except PackageResolutionError as exc:
-        raise click.ClickException(str(exc)) from exc
+        return package_sha256(package)
+    except PackageResolutionError:
+        return None
+
+
+def _resolve_trivy_format(ctx, generator: str, sbom_format: str) -> str:
+    """Default Trivy to SPDX when the format was left at its default.
+
+    Trivy only emits the SPDX contract here, so the CycloneDX default would
+    otherwise fail. An explicitly-passed format is always respected.
+    """
+    if (
+        generator == TRIVY_GENERATOR
+        and ctx.get_parameter_source("sbom_format") is ParameterSource.DEFAULT
+    ):
+        return SPDX_JSON
+    return sbom_format
+
+
+def _sbom_summary(content: dict) -> tuple[str, int]:
+    """Return a human format label and component count for an SBOM document."""
+    if content.get("bomFormat") == "CycloneDX":
+        return f"CycloneDX {content.get('specVersion', '')}".strip(), len(
+            content.get("components") or []
+        )
+    if content.get("spdxVersion"):
+        return str(content["spdxVersion"]), len(content.get("packages") or [])
+    return "unknown", 0
 
 
 def _list_sbom_entries(
@@ -150,18 +195,28 @@ def _list_sbom_entries(
 
 def _format_sbom_row(entry):
     """Format an SBOM metadata entry using the established list style."""
+    content = entry.get("content")
+    sbom_format, components = (
+        _sbom_summary(content) if isinstance(content, dict) else ("unknown", 0)
+    )
     return [
         click.style(entry.get("slug_perm") or "", fg="cyan"),
-        click.style(entry.get("content_type") or "", fg="yellow"),
+        click.style(sbom_format, fg="yellow"),
+        click.style(str(components), fg="blue"),
         click.style(entry.get("source_identity") or "", fg="green"),
         entry.get("created_at") or "",
     ]
 
 
-def _print_sbom_table(opts, entries, page_info=None, page_all=False):
+def _print_sbom_table(opts, entries, page_info=None, page_all=False, no_content=False):
     """Print SBOM metadata as a table with the standard list summary."""
+    json_entries = (
+        [{k: v for k, v in entry.items() if k != "content"} for entry in entries]
+        if no_content
+        else list(entries)
+    )
     if utils.maybe_print_as_json(
-        opts, list(entries), page_info=None if page_all else page_info
+        opts, json_entries, page_info=None if page_all else page_info
     ):
         return
 
@@ -195,8 +250,8 @@ def sbom_(ctx, opts):  # pylint: disable=unused-argument
     """
     Generate and manage package software bills of materials.
 
-    Use generate for a local document, add for an existing package, and list
-    or get to inspect attached SBOMs.
+    Use generate for a local document, add for an existing package, list or get
+    to inspect attached SBOMs, and remove to detach one.
     """
     _inherit_parent_output_format(ctx, opts)
     ctx.meta["sbom_output_format"] = opts.output
@@ -223,16 +278,28 @@ def sbom_(ctx, opts):  # pylint: disable=unused-argument
     type=click.Choice(SBOM_FORMATS),
     default=DEFAULT_SBOM_FORMAT,
     show_default=True,
-    help="SBOM document format and schema version.",
+    help="SBOM document format and schema version. Trivy emits SPDX only.",
+)
+@click.option(
+    "--sbom-source-type",
+    "source_type",
+    type=click.Choice(SOURCE_TYPES),
+    default=SOURCE_TYPE_AUTO,
+    show_default=True,
+    help=(
+        "How to interpret SOURCE. 'auto' infers directory vs image; use "
+        "'image' to scan a local image archive as an image (Trivy)."
+    ),
 )
 @click.option(
     "--output",
-    required=True,
+    default="-",
+    show_default=True,
     type=click.Path(dir_okay=False, allow_dash=True),
     help="Write the raw SBOM document to FILE, or '-' for stdout.",
 )
 @click.pass_context
-def generate_sbom(ctx, opts, source, generator, sbom_format, output):
+def generate_sbom(ctx, opts, source, generator, sbom_format, source_type, output):
     """
     Generate an SBOM for SOURCE using an external generator.
 
@@ -242,13 +309,17 @@ def generate_sbom(ctx, opts, source, generator, sbom_format, output):
     \b
     Examples:
         $ cloudsmith sbom generate . --output sbom.cdx.json
-        $ cloudsmith sbom generate image:tag --format spdx-json --output -
+        $ cloudsmith sbom generate image:tag --generator trivy --output -
     """
     _inherit_parent_output_format(ctx, opts)
     _require_raw_output(opts, output)
+    sbom_format = _resolve_trivy_format(ctx, generator, sbom_format)
     try:
         payload = generate_sbom_document(
-            source, generator=generator, output_format=sbom_format
+            source,
+            generator=generator,
+            output_format=sbom_format,
+            source_type=source_type,
         )
     except SbomError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -329,16 +400,23 @@ def add_sbom(
         payload = metadata.content
         assert payload is not None
         validate_sbom(payload)
+        ensure_within_metadata_size(payload)
     except SbomError as exc:
         raise click.ClickException(str(exc)) from exc
 
     with _handle_sbom_api_exceptions(ctx, opts, "Could not attach SBOM."):
         package = _resolve_package(owner, repo, identifier)
-        digest = package_sha256(package)
-        if subject_digest and normalize_sha256(subject_digest) != digest:
-            raise click.ClickException(
-                "--subject-digest does not match the resolved package digest."
-            )
+        digest = _optional_package_digest(package)
+        if subject_digest:
+            if digest is None:
+                raise click.ClickException(
+                    "Package exposes no SHA-256 digest to verify --subject-digest "
+                    "against."
+                )
+            if normalize_sha256(subject_digest) != digest:
+                raise click.ClickException(
+                    "--subject-digest does not match the resolved package digest."
+                )
         entries, _ = paginate_results(
             list_metadata,
             page_all=True,
@@ -380,7 +458,8 @@ def add_sbom(
     if not utils.maybe_print_as_json(opts, result):
         action = "attached as" if created else "already exists as"
         click.secho(f"SBOM {action} {entry.get('slug_perm', 'metadata')}", fg="green")
-        click.echo(f"Package SHA-256: {digest}")
+        if digest:
+            click.echo(f"Package SHA-256: {digest}")
 
 
 @sbom_.command(name="list", aliases=["ls"])
@@ -394,15 +473,21 @@ def add_sbom(
     metavar="OWNER/REPO/PACKAGE",
     callback=validators.validate_owner_repo_package,
 )
+@click.option(
+    "--no-content",
+    is_flag=True,
+    default=False,
+    help="Omit the full SBOM document from JSON output; list identifiers only.",
+)
 @click.pass_context
-def list_sboms(ctx, opts, owner_repo_package, page, page_size, page_all):
+def list_sboms(ctx, opts, owner_repo_package, page, page_size, page_all, no_content):
     """
     List SBOM metadata attached to a package.
 
     \b
     Examples:
         $ cloudsmith sbom list your-org/your-repo/your-pkg
-        $ cloudsmith sbom list your-org/your-repo/your-pkg --page-all -F json
+        $ cloudsmith sbom list your-org/your-repo/your-pkg --no-content -F json
     """
     _inherit_parent_output_format(ctx, opts)
     owner, repo, identifier = owner_repo_package
@@ -415,7 +500,9 @@ def list_sboms(ctx, opts, owner_repo_package, page, page_size, page_all):
             page_all=page_all,
         )
 
-    _print_sbom_table(opts, entries, page_info=page_info, page_all=page_all)
+    _print_sbom_table(
+        opts, entries, page_info=page_info, page_all=page_all, no_content=no_content
+    )
 
 
 @sbom_.command(name="get")
@@ -464,3 +551,56 @@ def get_sbom(ctx, opts, owner_repo_package, metadata_slug_perm, output):
         _write_raw_json(entry["content"], output)
     elif not utils.maybe_print_as_json(opts, entry):
         click.echo(json.dumps(entry, indent=2, sort_keys=True))
+
+
+@sbom_.command(name="remove", aliases=["rm"])
+@decorators.common_cli_config_options
+@decorators.common_cli_output_options
+@decorators.common_api_auth_options
+@decorators.initialise_api
+@click.argument(
+    "owner_repo_package",
+    metavar="OWNER/REPO/PACKAGE",
+    callback=validators.validate_owner_repo_package,
+)
+@click.argument("metadata_slug_perm")
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt.",
+)
+@click.pass_context
+def remove_sbom(ctx, opts, owner_repo_package, metadata_slug_perm, yes):
+    """
+    Remove an SBOM attached to a package.
+
+    METADATA_SLUG_PERM identifies the entry; run sbom list to see the
+    identifiers. Only SBOM entries are removable here -- use cloudsmith metadata
+    remove for other metadata.
+
+    \b
+    Example:
+        $ cloudsmith sbom remove your-org/your-repo/your-pkg meta-slug
+    """
+    _inherit_parent_output_format(ctx, opts)
+    owner, repo, identifier = owner_repo_package
+    use_stderr = utils.should_use_stderr(opts)
+
+    with _handle_sbom_api_exceptions(ctx, opts, "Could not remove SBOM."):
+        package = _resolve_package(owner, repo, identifier)
+        entry = get_metadata(package["slug_perm"], metadata_slug_perm)
+        if not _is_supported_sbom_entry(entry):
+            raise click.ClickException(
+                "The requested metadata entry is not a supported SBOM. "
+                "Use cloudsmith metadata remove for other metadata."
+            )
+        prompt = f"remove SBOM {metadata_slug_perm} from package {package['slug_perm']}"
+        if not utils.confirm_operation(prompt, assume_yes=yes, err=use_stderr):
+            return
+        delete_metadata(package["slug_perm"], metadata_slug_perm)
+
+    result = {"deleted": True, "slug_perm": metadata_slug_perm}
+    if not utils.maybe_print_as_json(opts, result):
+        click.secho(f"SBOM removed: {metadata_slug_perm}", fg="green")

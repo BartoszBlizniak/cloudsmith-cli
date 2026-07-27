@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -25,6 +26,10 @@ SBOM_METADATA_SIZE_LIMIT_HINT = (
     "The SBOM exceeds the package metadata size limit of about 5 MiB. "
     "Reduce the scan scope, or store the document out-of-band."
 )
+
+# Server-side package metadata request-body cap. Used to fail fast locally
+# before an expensive scan or upload rather than surfacing a raw HTTP 413.
+SBOM_METADATA_MAX_BYTES = 5 * 1024 * 1024
 
 
 class SbomError(Exception):
@@ -65,13 +70,24 @@ def validate_sbom(payload: dict[str, Any]) -> tuple[str, str]:
     return output_format, content_type
 
 
+def exceeds_metadata_size(payload: Any) -> bool:
+    """Return True if the JSON payload would exceed the metadata size cap."""
+    return len(json.dumps(payload).encode("utf-8")) > SBOM_METADATA_MAX_BYTES
+
+
+def ensure_within_metadata_size(payload: Any) -> None:
+    """Raise before upload if the payload exceeds the metadata size cap."""
+    if exceeds_metadata_size(payload):
+        raise SbomError(SBOM_METADATA_SIZE_LIMIT_HINT)
+
+
 def generate_sbom_details(
-    source: str, *, generator: str, output_format: str
+    source: str, *, generator: str, output_format: str, source_type: str = "auto"
 ) -> GeneratedSbom:
     """Generate an SBOM and return its external generator identity."""
     try:
         provider = get_generator(generator, output_format=output_format)
-        result = provider.generate(source, output_format)
+        result = provider.generate(source, output_format, source_type=source_type)
     except GeneratorProviderError as exc:
         raise GeneratorError(str(exc)) from exc
     detected_format, _ = validate_sbom(result.payload)
@@ -83,8 +99,13 @@ def generate_sbom_details(
     return result
 
 
-def generate_sbom(source: str, *, generator: str, output_format: str) -> dict[str, Any]:
+def generate_sbom(
+    source: str, *, generator: str, output_format: str, source_type: str = "auto"
+) -> dict[str, Any]:
     """Generate and compatibility-check an SBOM using an installed external tool."""
     return generate_sbom_details(
-        source, generator=generator, output_format=output_format
+        source,
+        generator=generator,
+        output_format=output_format,
+        source_type=source_type,
     ).payload

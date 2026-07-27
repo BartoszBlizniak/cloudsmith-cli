@@ -198,3 +198,20 @@ def test_generate_sbom_rejects_provider_format_mismatch(mock_get_generator):
 
     with pytest.raises(GeneratorError, match="spdx-json.*cyclonedx-json"):
         generate_sbom(".", generator="syft", output_format="cyclonedx-json")
+
+
+def test_ensure_within_metadata_size_rejects_oversized_payloads():
+    from cloudsmith_cli.core.sbom import (
+        SBOM_METADATA_MAX_BYTES,
+        ensure_within_metadata_size,
+    )
+
+    oversized = {"blob": "x" * (SBOM_METADATA_MAX_BYTES + 1)}
+    with pytest.raises(SbomError):
+        ensure_within_metadata_size(oversized)
+
+
+def test_ensure_within_metadata_size_allows_small_payloads():
+    from cloudsmith_cli.core.sbom import ensure_within_metadata_size
+
+    ensure_within_metadata_size({"ok": True})

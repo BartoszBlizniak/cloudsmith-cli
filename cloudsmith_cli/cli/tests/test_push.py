@@ -754,12 +754,13 @@ class TestPush(unittest.TestCase):
         assert failure is None
         assert metadata.content == payload
         assert metadata.content_type == "application/vnd.cloudsmith.sbom+json"
-        assert metadata.source_identity == "cli:syft"
+        assert metadata.source_identity == "cli:syft@1.49.0"
         assert metadata.source_label == "syft:scan-source"
         mock_generate.assert_called_once_with(
             ".",
             generator="syft",
             output_format="cyclonedx-json",
+            source_type="auto",
         )
 
     @patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
@@ -783,6 +784,7 @@ class TestPush(unittest.TestCase):
             "dist",
             generator="trivy",
             output_format="spdx-json",
+            source_type="auto",
         )
 
     @patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
@@ -797,7 +799,7 @@ class TestPush(unittest.TestCase):
         )
 
         assert failure is None
-        assert metadata.source_identity == "cli:trivy"
+        assert metadata.source_identity == "cli:trivy@0.72.0"
         assert metadata.source_label == "trivy:scan-source"
 
     @patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
@@ -820,6 +822,7 @@ class TestPush(unittest.TestCase):
             source,
             generator="syft",
             output_format="cyclonedx-json",
+            source_type="auto",
         )
 
     def test_resolve_push_sbom_options_requires_sbom_flag_for_customization(self):
@@ -1689,11 +1692,12 @@ def test_push_sbom_generates_and_passes_metadata_to_upload(
         ".",
         generator="syft",
         output_format="cyclonedx-json",
+        source_type="auto",
     )
     metadata = mock_upload.call_args.kwargs["metadata"]
     assert metadata.content == payload
     assert metadata.content_type == "application/vnd.cloudsmith.sbom+json"
-    assert metadata.source_identity == "cli:syft"
+    assert metadata.source_identity == "cli:syft@1.49.0"
     assert json.loads(result.stdout)["data"]["metadata_attachment"] == {
         "status": "attached",
         "slug_perm": "meta123",
@@ -1908,3 +1912,37 @@ def test_push_sbom_skip_errors_json_emits_one_document(
     assert output["detail"] == "Permission denied"
     assert output["meta"]["code"] == 403
     assert '"data"' not in result.stdout
+
+
+@patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+def test_resolve_push_sbom_trivy_defaults_to_spdx(mock_generate):
+    mock_generate.return_value = GeneratedSbom(
+        {"spdxVersion": "SPDX-2.3"}, "trivy", "0.72.0"
+    )
+    metadata, failure = resolve_push_sbom_options(
+        generate_sbom=True, sbom_generator="trivy"
+    )
+    assert failure is None
+    assert mock_generate.call_args.kwargs["output_format"] == "spdx-json"
+    assert metadata.source_identity == "cli:trivy@0.72.0"
+
+
+@patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+def test_resolve_push_sbom_passes_source_type(mock_generate):
+    mock_generate.return_value = GeneratedSbom(
+        {"spdxVersion": "SPDX-2.3"}, "trivy", "0.72.0"
+    )
+    resolve_push_sbom_options(
+        generate_sbom=True, sbom_generator="trivy", sbom_source_type="image"
+    )
+    assert mock_generate.call_args.kwargs["source_type"] == "image"
+
+
+@patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+def test_resolve_push_sbom_fails_fast_on_oversized(mock_generate, monkeypatch):
+    monkeypatch.setattr("cloudsmith_cli.core.sbom.SBOM_METADATA_MAX_BYTES", 16)
+    mock_generate.return_value = GeneratedSbom(
+        {"bomFormat": "CycloneDX", "specVersion": "1.6"}, "syft", "1.49.0"
+    )
+    with pytest.raises(click.ClickException):
+        resolve_push_sbom_options(generate_sbom=True)

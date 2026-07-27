@@ -428,3 +428,43 @@ def test_provider_controls_cache_without_dropping_registry_auth(tmp_path, monkey
     assert environment["SYFT_CACHE_DIR"].startswith(str(tmp_path))
     assert environment["SYFT_CHECK_FOR_APP_UPDATE"] == "false"
     assert environment["AWS_ACCESS_KEY_ID"] == "private-registry-identity"
+
+
+def test_trivy_directory_source_type_forces_filesystem_scan():
+    command = TrivyGenerator("/opt/trivy").build_command(
+        "some-ref", "spdx-json", "directory"
+    )
+
+    assert command == ["/opt/trivy", "fs", "--format", "spdx-json", "some-ref"]
+
+
+def test_trivy_image_source_type_uses_input_for_a_local_archive(tmp_path):
+    archive = tmp_path / "image.tar"
+    archive.write_bytes(b"x")
+
+    command = TrivyGenerator("/opt/trivy").build_command(
+        str(archive), "spdx-json", "image"
+    )
+
+    assert command == [
+        "/opt/trivy",
+        "image",
+        "--input",
+        str(archive),
+        "--format",
+        "spdx-json",
+    ]
+
+
+def test_trivy_image_source_type_passes_a_registry_reference_positionally():
+    command = TrivyGenerator("/opt/trivy").build_command(
+        "registry/img:tag", "spdx-json", "image"
+    )
+
+    assert command == [
+        "/opt/trivy",
+        "image",
+        "--format",
+        "spdx-json",
+        "registry/img:tag",
+    ]

@@ -8,7 +8,6 @@ from click.testing import CliRunner
 from cloudsmith_cli.cli.commands.main import main
 from cloudsmith_cli.cli.commands.sbom import sbom_
 from cloudsmith_cli.core.api.exceptions import ApiException
-from cloudsmith_cli.core.api.packages import PackageResolutionError
 from cloudsmith_cli.core.pagination import PageInfo
 
 PACKAGE = {
@@ -169,7 +168,7 @@ def test_sbom_add_rejects_invalid_subject_digest_as_json_usage_error(
 @patch("cloudsmith_cli.cli.commands.sbom.create_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_add_validates_before_create(
     mock_resolve, mock_list, mock_validate, mock_create, tmp_path
 ):
@@ -197,7 +196,7 @@ def test_add_validates_before_create(
 @patch("cloudsmith_cli.cli.commands.sbom.create_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_add_reads_sbom_from_stdin(
     _mock_resolve, mock_list, mock_validate, mock_create
 ):
@@ -220,7 +219,7 @@ def test_add_reads_sbom_from_stdin(
 @patch("cloudsmith_cli.cli.commands.sbom.create_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_add_is_idempotent(
     _mock_resolve, mock_list, mock_validate, mock_create, tmp_path
 ):
@@ -257,7 +256,7 @@ def test_add_is_idempotent(
     mock_create.assert_not_called()
 
 
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_add_rejects_digest_mismatch(_mock_resolve, tmp_path):
     sbom_file = tmp_path / "bom.json"
     sbom_file.write_text(json.dumps(SPDX_SBOM), encoding="utf-8")
@@ -276,43 +275,23 @@ def test_add_rejects_digest_mismatch(_mock_resolve, tmp_path):
     assert "does not match" in result.output
 
 
+@patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
 @patch(
-    "cloudsmith_cli.cli.commands.sbom.resolve_package",
-    side_effect=PackageResolutionError(
-        "Resolved package does not expose a SHA-256 digest."
-    ),
+    "cloudsmith_cli.cli.commands.sbom.get_package",
+    return_value={"slug": "example", "slug_perm": "pkg123"},
 )
-def test_list_renders_digest_resolution_failure_as_pretty_error(_mock_resolve):
-    result = CliRunner().invoke(sbom_, ["list", "org/repo/example"])
+def test_list_does_not_require_a_package_digest(_mock_resolve, mock_list_metadata):
+    # Reads never use the digest, so a package without one must still list.
+    mock_list_metadata.return_value = ([], _empty_page_info())
 
-    assert result.exit_code == 1
-    assert "Error: Resolved package does not expose a SHA-256 digest." in result.output
-    assert result.exception is not None
-    assert not isinstance(result.exception, PackageResolutionError)
+    result = CliRunner().invoke(sbom_, ["list", "-F", "json", "org/repo/example"])
 
-
-@patch(
-    "cloudsmith_cli.cli.commands.sbom.resolve_package",
-    side_effect=PackageResolutionError(
-        "Resolved package does not expose a SHA-256 digest."
-    ),
-)
-def test_list_renders_digest_resolution_failure_as_json(_mock_resolve, monkeypatch):
-    monkeypatch.setattr("sys.argv", ["cloudsmith", "sbom", "list", "-F", "json"])
-
-    result = CliRunner().invoke(
-        sbom_,
-        ["list", "-F", "json", "org/repo/example"],
-    )
-
-    assert result.exit_code == 1
-    output = json.loads(result.stdout)
-    assert output["meta"]["code"] == 1
-    assert output["detail"] == ("Resolved package does not expose a SHA-256 digest.")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["data"] == []
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.get_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_get_rejects_sbom_shaped_metadata_with_an_untyped_content_type(
     _mock_resolve, mock_get_metadata
 ):
@@ -334,7 +313,7 @@ def test_get_rejects_sbom_shaped_metadata_with_an_untyped_content_type(
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_ignores_sbom_shaped_metadata_with_an_untyped_content_type(
     _mock_resolve, mock_list_metadata
 ):
@@ -357,7 +336,7 @@ def test_list_ignores_sbom_shaped_metadata_with_an_untyped_content_type(
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_ignores_typed_sbom_with_non_object_content(
     _mock_resolve, mock_list_metadata
 ):
@@ -382,7 +361,7 @@ def test_list_ignores_typed_sbom_with_non_object_content(
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.get_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_get_rejects_typed_sbom_with_non_object_content(
     _mock_resolve, mock_get_metadata
 ):
@@ -402,7 +381,7 @@ def test_get_rejects_typed_sbom_with_non_object_content(
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_honors_group_level_json_format(_mock_resolve, mock_list_metadata):
     entry = {
         "slug_perm": "sbom-1",
@@ -426,7 +405,7 @@ def test_list_honors_group_level_json_format(_mock_resolve, mock_list_metadata):
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_child_output_format_overrides_group_format(
     _mock_resolve, mock_list_metadata
 ):
@@ -453,7 +432,7 @@ def test_list_child_output_format_overrides_group_format(
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_pretty_output_uses_table_and_result_summary(
     _mock_resolve, mock_list_metadata
 ):
@@ -477,17 +456,19 @@ def test_list_pretty_output_uses_table_and_result_summary(
 
     assert result.exit_code == 0, result.output
     assert "Slug" in result.output
-    assert "Content type" in result.output
+    assert "Format" in result.output
+    assert "Components" in result.output
     assert "Source identity" in result.output
     assert "Created" in result.output
     assert "sbom-1" in result.output
+    assert "CycloneDX 1.6" in result.output
     assert "cli:syft" in result.output
     assert "2026-07-23T12:00:00Z" in result.output
     assert "Results: 1 SBOM retrieved" in result.output
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_pretty_output_has_clear_empty_state(_mock_resolve, mock_list_metadata):
     mock_list_metadata.return_value = ([], _empty_page_info())
 
@@ -508,7 +489,7 @@ def test_get_requires_a_metadata_slug():
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.get_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_get_returns_the_selected_entry_as_json(_mock_resolve, mock_get_metadata):
     entry = {
         "slug_perm": "meta123",
@@ -529,7 +510,7 @@ def test_get_returns_the_selected_entry_as_json(_mock_resolve, mock_get_metadata
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_paginates_the_filtered_sbom_collection(_mock_resolve, mock_list_metadata):
     first_sbom = {
         "slug_perm": "sbom-1",
@@ -598,7 +579,7 @@ def test_list_paginates_the_filtered_sbom_collection(_mock_resolve, mock_list_me
 
 
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_list_pretty_output_includes_filtered_pagination(
     _mock_resolve, mock_list_metadata
 ):
@@ -641,7 +622,7 @@ def test_list_pretty_output_includes_filtered_pagination(
 @patch("cloudsmith_cli.cli.commands.sbom.create_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_add_allows_source_identity_override(
     _mock_resolve, mock_list, mock_validate, mock_create, tmp_path
 ):
@@ -676,7 +657,7 @@ def test_add_allows_source_identity_override(
 
 
 @patch(
-    "cloudsmith_cli.cli.commands.sbom.resolve_package",
+    "cloudsmith_cli.cli.commands.sbom.get_package",
     side_effect=ApiException(status=404, detail="Package not found"),
 )
 def test_add_renders_clear_missing_package_error(_mock_resolve, tmp_path):
@@ -697,7 +678,7 @@ def test_add_renders_clear_missing_package_error(_mock_resolve, tmp_path):
 
 
 @patch(
-    "cloudsmith_cli.cli.commands.sbom.resolve_package",
+    "cloudsmith_cli.cli.commands.sbom.get_package",
     side_effect=ApiException(status=404, detail="Package not found"),
 )
 def test_add_json_api_error_emits_one_document(_mock_resolve, tmp_path):
@@ -716,7 +697,9 @@ def test_add_json_api_error_emits_one_document(_mock_resolve, tmp_path):
         ],
     )
 
-    assert result.exit_code == 404
+    # HTTP status is carried in the JSON envelope; the process exit code is a
+    # stable 1 (an HTTP status is not a valid exit code).
+    assert result.exit_code == 1
     output = json.loads(result.stdout)
     assert output["detail"] == "Package not found"
     assert output["help"]["context"] == "Could not attach SBOM."
@@ -729,7 +712,7 @@ def test_add_json_api_error_emits_one_document(_mock_resolve, tmp_path):
 )
 @patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_add_renders_clear_permission_error(
     _mock_resolve, mock_list, _mock_validate, _mock_create, tmp_path
 ):
@@ -753,7 +736,7 @@ def test_add_renders_clear_permission_error(
 )
 @patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
 @patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
-@patch("cloudsmith_cli.cli.commands.sbom.resolve_package", return_value=PACKAGE)
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
 def test_add_explains_oversized_sbom(
     _mock_resolve, mock_list, _mock_validate, _mock_create, tmp_path
 ):
@@ -769,3 +752,126 @@ def test_add_explains_oversized_sbom(
     assert result.exit_code != 0
     assert "Could not attach SBOM" in result.output
     assert "size limit of about 5 MiB" in result.output
+
+
+@patch("cloudsmith_cli.cli.commands.sbom.generate_sbom_document")
+def test_generate_trivy_defaults_to_spdx_format(mock_generate):
+    mock_generate.return_value = SPDX_SBOM
+    result = CliRunner().invoke(
+        sbom_, ["generate", ".", "--generator", "trivy", "--output", "-"]
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_generate.call_args.kwargs["output_format"] == "spdx-json"
+
+
+@patch("cloudsmith_cli.cli.commands.sbom.generate_sbom_document")
+def test_generate_defaults_output_to_stdout(mock_generate):
+    mock_generate.return_value = {"bomFormat": "CycloneDX", "specVersion": "1.6"}
+    result = CliRunner().invoke(sbom_, ["generate", "."])
+    assert result.exit_code == 0, result.output
+    assert '"bomFormat": "CycloneDX"' in result.output
+
+
+def test_add_fails_fast_on_oversized_sbom(monkeypatch, tmp_path):
+    monkeypatch.setattr("cloudsmith_cli.core.sbom.SBOM_METADATA_MAX_BYTES", 16)
+    sbom_file = tmp_path / "bom.json"
+    sbom_file.write_text(json.dumps(SPDX_SBOM), encoding="utf-8")
+    result = CliRunner().invoke(
+        sbom_, ["add", "org/repo/example", "--file", str(sbom_file)]
+    )
+    assert result.exit_code != 0
+    assert "size limit" in result.output
+
+
+@patch(
+    "cloudsmith_cli.cli.commands.sbom.create_metadata",
+    return_value={"slug_perm": "m1"},
+)
+@patch("cloudsmith_cli.cli.commands.sbom.validate_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
+@patch(
+    "cloudsmith_cli.cli.commands.sbom.get_package",
+    return_value={"slug": "example", "slug_perm": "pkg123"},
+)
+def test_add_attaches_to_a_package_without_a_digest(
+    _mock_resolve, mock_list, _mock_validate, _mock_create, tmp_path
+):
+    mock_list.return_value = ([], _empty_page_info())
+    sbom_file = tmp_path / "bom.json"
+    sbom_file.write_text(json.dumps(SPDX_SBOM), encoding="utf-8")
+    result = CliRunner().invoke(
+        sbom_, ["add", "org/repo/example", "--file", str(sbom_file)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "SBOM attached as m1" in result.output
+    assert "Package SHA-256" not in result.output
+
+
+@patch(
+    "cloudsmith_cli.cli.commands.sbom.get_package",
+    return_value={"slug": "example", "slug_perm": "pkg123"},
+)
+def test_add_subject_digest_without_a_package_digest_errors(_mock_resolve, tmp_path):
+    sbom_file = tmp_path / "bom.json"
+    sbom_file.write_text(json.dumps(SPDX_SBOM), encoding="utf-8")
+    result = CliRunner().invoke(
+        sbom_,
+        [
+            "add",
+            "org/repo/example",
+            "--file",
+            str(sbom_file),
+            "--subject-digest",
+            "d" * 64,
+        ],
+    )
+    assert result.exit_code != 0
+    assert "no SHA-256 digest to verify" in result.output
+
+
+@patch("cloudsmith_cli.cli.commands.sbom.list_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
+def test_list_no_content_omits_payload(_mock_resolve, mock_list_metadata):
+    entry = {
+        "slug_perm": "sbom-1",
+        "content_type": "application/vnd.cloudsmith.sbom+json",
+        "source_identity": "cli:syft@1.49.0",
+        "content": {"bomFormat": "CycloneDX", "specVersion": "1.6"},
+    }
+    mock_list_metadata.return_value = ([entry], _empty_page_info())
+    result = CliRunner().invoke(
+        sbom_,
+        ["list", "-F", "json", "org/repo/example", "--page-all", "--no-content"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)["data"]
+    assert data and "content" not in data[0]
+    assert data[0]["slug_perm"] == "sbom-1"
+
+
+@patch("cloudsmith_cli.cli.commands.sbom.delete_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.get_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
+def test_remove_deletes_a_supported_sbom(_mock_resolve, mock_get, mock_delete):
+    mock_get.return_value = {
+        "slug_perm": "sbom-1",
+        "content_type": "application/vnd.cloudsmith.sbom+json",
+        "content": SPDX_SBOM,
+    }
+    result = CliRunner().invoke(sbom_, ["remove", "org/repo/example", "sbom-1", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "SBOM removed: sbom-1" in result.output
+    mock_delete.assert_called_once_with("pkg123", "sbom-1")
+
+
+@patch("cloudsmith_cli.cli.commands.sbom.get_metadata")
+@patch("cloudsmith_cli.cli.commands.sbom.get_package", return_value=PACKAGE)
+def test_remove_rejects_non_sbom_metadata(_mock_resolve, mock_get):
+    mock_get.return_value = {
+        "slug_perm": "meta-1",
+        "content_type": "application/json",
+        "content": {"k": "v"},
+    }
+    result = CliRunner().invoke(sbom_, ["remove", "org/repo/example", "meta-1", "-y"])
+    assert result.exit_code != 0
+    assert "not a supported SBOM" in result.output
