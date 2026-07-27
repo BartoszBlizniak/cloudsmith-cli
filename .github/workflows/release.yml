@@ -277,11 +277,9 @@ jobs:
           cloudsmith whoami
 
       - name: Install Syft for push-time SBOM generation
-        run: |
-          set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/v1.49.0/install.sh \
-            | sh -s -- -b /usr/local/bin v1.49.0
-          syft version
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.49.0
 
       - name: Publish binaries and Python distributions
         run: |
