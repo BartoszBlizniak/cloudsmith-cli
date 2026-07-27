@@ -8,12 +8,17 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from ...core.api.exceptions import ApiException
+from ...core.sbom import SbomError
+from ...core.sbom.generators.base import GeneratedSbom
 from ..commands.push import (
     _print_metadata_retry_hint,
     attach_metadata_to_package,
+    push,
     resolve_push_metadata_options,
+    resolve_push_sbom_options,
     upload_files_and_create_package,
     validate_metadata_payload,
 )
@@ -684,6 +689,27 @@ class TestPush(unittest.TestCase):
                 version="1",
             )
 
+    def test_empty_metadata_companion_options_without_payload_error(self):
+        """Explicit empty companion values are still treated as supplied."""
+        for option_name in ("metadata_content_type", "metadata_source_identity"):
+            with self.subTest(option_name=option_name):
+                with pytest.raises(
+                    click.UsageError,
+                    match="Add --metadata-content-file or --metadata-content",
+                ):
+                    resolve_push_metadata_options(**{option_name: ""})
+
+    def test_empty_metadata_source_identity_with_payload_errors(self):
+        with pytest.raises(
+            click.UsageError,
+            match="--metadata-source-identity cannot be empty",
+        ):
+            resolve_push_metadata_options(
+                metadata_content="{}",
+                metadata_content_type="application/json",
+                metadata_source_identity="",
+            )
+
     def test_metadata_content_without_content_type_errors(self):
         """Metadata content requires --metadata-content-type."""
         with pytest.raises(click.UsageError, match="--metadata-content-type"):
@@ -713,6 +739,107 @@ class TestPush(unittest.TestCase):
         assert metadata.content == {"k": "v"}
         assert metadata.content_type == "application/json"
         assert metadata.source_label == "inline"
+
+    @patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+    def test_resolve_push_sbom_options_uses_prototype_defaults(self, mock_generate):
+        payload = {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.6",
+            "version": 1,
+        }
+        mock_generate.return_value = GeneratedSbom(payload, "syft", "1.49.0")
+
+        metadata, failure = resolve_push_sbom_options(generate_sbom=True)
+
+        assert failure is None
+        assert metadata.content == payload
+        assert metadata.content_type == "application/vnd.cloudsmith.sbom+json"
+        assert metadata.source_identity == "cli:syft"
+        assert metadata.source_label == "syft:scan-source"
+        mock_generate.assert_called_once_with(
+            ".",
+            generator="syft",
+            output_format="cyclonedx-json",
+        )
+
+    @patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+    def test_resolve_push_sbom_options_accepts_overrides(self, mock_generate):
+        mock_generate.return_value = GeneratedSbom(
+            {"spdxVersion": "SPDX-2.3"}, "trivy", "0.72.0"
+        )
+
+        metadata, failure = resolve_push_sbom_options(
+            generate_sbom=True,
+            sbom_source="dist",
+            sbom_generator="trivy",
+            sbom_format="spdx-json",
+            sbom_source_identity="gha:run-123",
+        )
+
+        assert failure is None
+        assert metadata.content_type == "application/vnd.cloudsmith.sbom+json"
+        assert metadata.source_identity == "gha:run-123"
+        mock_generate.assert_called_once_with(
+            "dist",
+            generator="trivy",
+            output_format="spdx-json",
+        )
+
+    @patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+    def test_resolve_push_sbom_auto_uses_selected_generator(self, mock_generate):
+        payload = {"spdxVersion": "SPDX-2.3"}
+        mock_generate.return_value = GeneratedSbom(payload, "trivy", "0.72.0")
+
+        metadata, failure = resolve_push_sbom_options(
+            generate_sbom=True,
+            sbom_generator="auto",
+            sbom_format="spdx-json",
+        )
+
+        assert failure is None
+        assert metadata.source_identity == "cli:trivy"
+        assert metadata.source_label == "trivy:scan-source"
+
+    @patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+    def test_resolve_push_sbom_never_exposes_scan_source_in_display_label(
+        self, mock_generate
+    ):
+        payload = {"bomFormat": "CycloneDX", "specVersion": "1.6"}
+        mock_generate.return_value = GeneratedSbom(payload, "syft", "1.49.0")
+        source = "https://user:secret@example.test/private-image"
+
+        metadata, failure = resolve_push_sbom_options(
+            generate_sbom=True,
+            sbom_source=source,
+        )
+
+        assert failure is None
+        assert metadata.source_label == "syft:scan-source"
+        assert "secret" not in metadata.source_label
+        mock_generate.assert_called_once_with(
+            source,
+            generator="syft",
+            output_format="cyclonedx-json",
+        )
+
+    def test_resolve_push_sbom_options_requires_sbom_flag_for_customization(self):
+        with pytest.raises(click.UsageError, match="Add --sbom"):
+            resolve_push_sbom_options(sbom_source="dist")
+
+    def test_resolve_push_sbom_options_rejects_empty_custom_values(self):
+        for option_name, kwarg_name in (
+            ("--sbom-source", "sbom_source"),
+            ("--sbom-source-identity", "sbom_source_identity"),
+        ):
+            with self.subTest(option_name=option_name):
+                with pytest.raises(
+                    click.UsageError,
+                    match=f"{option_name} cannot be empty",
+                ):
+                    resolve_push_sbom_options(
+                        generate_sbom=True,
+                        **{kwarg_name: ""},
+                    )
 
     def test_resolve_push_metadata_options_json_null_rejected(self):
         with pytest.raises(click.ClickException, match="JSON object"):
@@ -1342,19 +1469,71 @@ def test_attach_metadata_json_failure_uses_api_error_envelope(capsys):
                 slug="hello-txt",
                 slug_perm="hello-txt-abc",
                 content={"x": 1},
-                content_type="application/json",
+                content_type="application/vnd.cloudsmith.sbom+json",
                 source_identity="ci@example",
+                is_sbom=True,
             )
 
     assert exc_info.value.exit_code == 422
     data = json.loads(capsys.readouterr().out)
     assert data["detail"] == "bad payload"
     assert data["help"]["context"].startswith("Could not attach metadata")
-    assert data["metadata_attachment"] == {
-        "status": "attach_failed",
-        "http_status": 422,
-        "error": "bad payload",
+    failure = data["metadata_attachment"]
+    assert failure["status"] == "attach_failed"
+    assert failure["http_status"] == 422
+    assert failure["error"] == "bad payload"
+    assert failure["package_created"] is True
+    assert failure["package"] == {
+        "slug": "hello-txt",
+        "slug_perm": "hello-txt-abc",
+        "target": "acme/repo/hello-txt-abc",
     }
+    assert failure["retry"]["command"] == (
+        "cloudsmith sbom add acme/repo/hello-txt-abc "
+        "--file PATH_TO_SBOM_JSON --source-identity ci@example"
+    )
+    assert "package remains published" in failure["retry"]["hint"]
+    assert "Regenerate the SBOM" in failure["retry"]["hint"]
+
+
+def test_attach_metadata_pretty_failure_explains_safe_sbom_recovery(capsys):
+    ctx = click.Context(click.Command("push"))
+    opts = _api_opts(output=None)
+
+    with (
+        patch(
+            "cloudsmith_cli.cli.commands.push.api_create_metadata",
+            side_effect=ApiException(status=422, detail="bad payload"),
+        ),
+        patch.dict(
+            "cloudsmith_cli.cli.commands.push.os.environ",
+            {},
+            clear=False,
+        ) as patched_env,
+    ):
+        patched_env.pop("CLOUDSMITH_METADATA_FAILURE_MODE", None)
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            attach_metadata_to_package(
+                ctx=ctx,
+                opts=opts,
+                owner="acme",
+                repo="repo",
+                slug="hello-txt",
+                slug_perm="hello-txt-abc",
+                content={"x": 1},
+                content_type="application/vnd.cloudsmith.sbom+json",
+                source_identity="cli:syft",
+                is_sbom=True,
+            )
+
+    assert exc_info.value.exit_code == 422
+    err = capsys.readouterr().err
+    assert "Package acme/repo/hello-txt-abc remains published without its SBOM." in err
+    assert "Regenerate the SBOM to a file, then attach it with:" in err
+    assert (
+        "cloudsmith sbom add acme/repo/hello-txt-abc "
+        "--file PATH_TO_SBOM_JSON --source-identity cli:syft" in err
+    )
 
 
 def test_print_metadata_retry_hint_emits_copy_paste_command(capsys):
@@ -1464,3 +1643,268 @@ def test_options_metadata_failure_mode_none_is_noop():
     opts = Options()
     opts.metadata_failure_mode = None
     assert opts.metadata_failure_mode is None
+
+
+@patch("cloudsmith_cli.cli.commands.push.upload_files_and_create_package")
+@patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+def test_push_sbom_generates_and_passes_metadata_to_upload(
+    mock_generate, mock_upload, tmp_path
+):
+    payload = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "version": 1,
+    }
+    mock_generate.return_value = GeneratedSbom(payload, "syft", "1.49.0")
+
+    def uploaded(*_args, **kwargs):
+        kwargs["opts"].push_metadata_info = {
+            "status": "attached",
+            "slug_perm": "meta123",
+        }
+        return "pkg123", "example"
+
+    mock_upload.side_effect = uploaded
+    package_file = tmp_path / "example.txt"
+    package_file.write_text("hello", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        push,
+        [
+            "raw",
+            "-F",
+            "json",
+            "org/repo",
+            str(package_file),
+            "--name",
+            "example",
+            "--version",
+            "1.0",
+            "--sbom",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    mock_generate.assert_called_once_with(
+        ".",
+        generator="syft",
+        output_format="cyclonedx-json",
+    )
+    metadata = mock_upload.call_args.kwargs["metadata"]
+    assert metadata.content == payload
+    assert metadata.content_type == "application/vnd.cloudsmith.sbom+json"
+    assert metadata.source_identity == "cli:syft"
+    assert json.loads(result.stdout)["data"]["metadata_attachment"] == {
+        "status": "attached",
+        "slug_perm": "meta123",
+    }
+
+
+@patch("cloudsmith_cli.cli.commands.push.wait_for_package_sync")
+@patch(
+    "cloudsmith_cli.cli.commands.push.create_package",
+    return_value=("pkg123", "example"),
+)
+@patch(
+    "cloudsmith_cli.cli.commands.push.upload_file",
+    return_value="package-file-id",
+)
+@patch(
+    "cloudsmith_cli.cli.commands.push.validate_upload_file",
+    return_value="checksum",
+)
+@patch("cloudsmith_cli.cli.commands.push.validate_create_package")
+@patch(
+    "cloudsmith_cli.cli.commands.push.generate_sbom_details",
+    side_effect=SbomError("generator unavailable"),
+)
+def test_push_sbom_generation_failure_warn_succeeds_with_retry_guidance(
+    mock_generate,
+    _mock_validate_package,
+    _mock_validate_file,
+    _mock_upload,
+    mock_create,
+    mock_wait,
+    tmp_path,
+):
+    package_file = tmp_path / "example.txt"
+    package_file.write_text("hello", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        push,
+        [
+            "raw",
+            "org/repo",
+            str(package_file),
+            "--name",
+            "example",
+            "--version",
+            "1.0",
+            "--sbom",
+            "--on-metadata-failure",
+            "warn",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    mock_generate.assert_called_once()
+    mock_create.assert_called_once()
+    mock_wait.assert_called_once()
+    assert "SBOM generation failed: generator unavailable" in result.output
+    assert (
+        "Package org/repo/pkg123 remains published without its SBOM." in result.output
+    )
+    assert "Regenerate the SBOM to a file, then attach it with:" in result.output
+    assert (
+        "cloudsmith sbom add org/repo/pkg123 --file PATH_TO_SBOM_JSON "
+        "--source-identity cli:syft" in result.output
+    )
+
+    json_result = CliRunner().invoke(
+        push,
+        [
+            "raw",
+            "-F",
+            "json",
+            "org/repo",
+            str(package_file),
+            "--name",
+            "example",
+            "--version",
+            "1.0",
+            "--sbom",
+            "--on-metadata-failure",
+            "warn",
+        ],
+    )
+
+    assert json_result.exit_code == 0, json_result.output
+    failure = json.loads(json_result.stdout)["data"]["metadata_attachment"]
+    assert failure["status"] == "generation_failed"
+    assert failure["package_created"] is True
+    assert failure["package"]["target"] == "org/repo/pkg123"
+    assert failure["retry"]["command"] == (
+        "cloudsmith sbom add org/repo/pkg123 --file PATH_TO_SBOM_JSON "
+        "--source-identity cli:syft"
+    )
+
+
+@patch("cloudsmith_cli.cli.commands.push.upload_files_and_create_package")
+def test_push_empty_sbom_option_is_still_treated_as_supplied(mock_upload, tmp_path):
+    package_file = tmp_path / "example.txt"
+    package_file.write_text("hello", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        push,
+        [
+            "raw",
+            "org/repo",
+            str(package_file),
+            "--name",
+            "example",
+            "--version",
+            "1.0",
+            "--sbom-source",
+            "",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Add --sbom when using --sbom-source." in result.output
+    mock_upload.assert_not_called()
+
+
+@patch("cloudsmith_cli.cli.commands.push.upload_files_and_create_package")
+@patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+def test_push_empty_metadata_option_is_still_treated_as_supplied(
+    mock_generate, mock_upload, tmp_path
+):
+    package_file = tmp_path / "example.txt"
+    package_file.write_text("hello", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        push,
+        [
+            "raw",
+            "org/repo",
+            str(package_file),
+            "--name",
+            "example",
+            "--version",
+            "1.0",
+            "--metadata-content",
+            "",
+            "--sbom",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--sbom cannot be combined with --metadata-content-file" in result.output
+    mock_generate.assert_not_called()
+    mock_upload.assert_not_called()
+
+
+def test_push_sbom_rejects_multiple_files(tmp_path):
+    first = tmp_path / "one.txt"
+    second = tmp_path / "two.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        push,
+        [
+            "raw",
+            "org/repo",
+            str(first),
+            str(second),
+            "--sbom",
+        ],
+    )
+
+    # Raw accepts one package file, while multi-file formats enforce this
+    # explicitly in the shared handler. Either way, Click must fail safely.
+    assert result.exit_code == 2
+
+
+@patch(
+    "cloudsmith_cli.cli.commands.push.api_validate_create_package",
+    side_effect=ApiException(status=403, detail="Permission denied"),
+)
+@patch("cloudsmith_cli.cli.commands.push.generate_sbom_details")
+def test_push_sbom_skip_errors_json_emits_one_document(
+    mock_generate, _mock_validate, tmp_path
+):
+    mock_generate.return_value = GeneratedSbom(
+        {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.6",
+            "version": 1,
+        },
+        "syft",
+        "1.49.0",
+    )
+    package_file = tmp_path / "example.txt"
+    package_file.write_text("hello", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        push,
+        [
+            "raw",
+            "-F",
+            "json",
+            "--skip-errors",
+            "org/repo",
+            str(package_file),
+            "--name",
+            "example",
+            "--version",
+            "1.0",
+            "--sbom",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.stdout)
+    assert output["detail"] == "Permission denied"
+    assert output["meta"]["code"] == 403
+    assert '"data"' not in result.stdout

@@ -29,6 +29,15 @@ from ...core.api.packages import (
     get_package_status,
     validate_create_package as api_validate_create_package,
 )
+from ...core.sbom import (
+    CLOUDSMITH_SBOM_CONTENT_TYPE,
+    DEFAULT_SBOM_SOURCE_IDENTITY,
+    SBOM_METADATA_SIZE_LIMIT_HINT,
+    SbomError,
+    generate_sbom_details,
+)
+from ...core.sbom.contracts import DEFAULT_SBOM_FORMAT, SBOM_FORMATS
+from ...core.sbom.generators import AUTO_GENERATOR, DEFAULT_GENERATOR, GENERATOR_NAMES
 from .. import command, decorators, utils, validators
 from ..exceptions import handle_api_exceptions
 from ..metadata_common import (
@@ -62,6 +71,13 @@ METADATA_KWARG_NAMES = (
     "metadata_content",
     "metadata_content_type",
     "metadata_source_identity",
+)
+SBOM_KWARG_NAMES = (
+    "generate_sbom",
+    "sbom_source",
+    "sbom_generator",
+    "sbom_format",
+    "sbom_source_identity",
 )
 #: Click dest name for ``--on-metadata-failure``. Popped off the push kwargs
 #: separately from the metadata payload kwargs so it does not leak into the
@@ -106,8 +122,12 @@ def _metadata_content_failure_info(exc):
 
 
 def _warn_metadata_failure(failure_info):
+    if failure_info.get("status") == "generation_failed":
+        heading = "SBOM generation failed"
+    else:
+        heading = "Metadata content is invalid"
     click.secho(
-        "Metadata content is invalid: %(error)s" % failure_info,
+        f"{heading}: {failure_info['error']}",
         fg="yellow",
         err=True,
     )
@@ -118,6 +138,75 @@ def _warn_metadata_failure(failure_info):
         "env var to ``error``) to fail the push instead.",
         fg="yellow",
         err=True,
+    )
+
+
+def resolve_push_sbom_options(
+    *,
+    generate_sbom=False,
+    sbom_source=None,
+    sbom_generator=None,
+    sbom_format=None,
+    sbom_source_identity=None,
+    opts=None,
+):
+    """Generate and resolve the metadata payload for ``push --sbom``."""
+    custom_options = {
+        "--sbom-source": sbom_source,
+        "--sbom-generator": sbom_generator,
+        "--sbom-format": sbom_format,
+        "--sbom-source-identity": sbom_source_identity,
+    }
+    if not generate_sbom:
+        supplied = [name for name, value in custom_options.items() if value is not None]
+        if supplied:
+            raise click.UsageError(f"Add --sbom when using {', '.join(supplied)}.")
+        return ResolvedMetadata(provided=False, content=None), None
+
+    for option_name in ("--sbom-source", "--sbom-source-identity"):
+        if custom_options[option_name] == "":
+            raise click.UsageError(f"{option_name} cannot be empty.")
+
+    source = sbom_source or "."
+    generator = sbom_generator or DEFAULT_GENERATOR
+    output_format = sbom_format or DEFAULT_SBOM_FORMAT
+    source_identity = sbom_source_identity or (
+        DEFAULT_SBOM_SOURCE_IDENTITY
+        if generator in {AUTO_GENERATOR, DEFAULT_GENERATOR}
+        else f"cli:{generator}"
+    )
+
+    try:
+        generated = generate_sbom_details(
+            source,
+            generator=generator,
+            output_format=output_format,
+        )
+    except SbomError as exc:
+        if not _metadata_failure_is_warn(opts):
+            raise click.ClickException(str(exc)) from exc
+        return (
+            ResolvedMetadata(
+                provided=True,
+                content=None,
+                content_type=CLOUDSMITH_SBOM_CONTENT_TYPE,
+                source_identity=source_identity,
+                source_label=f"{generator}:scan-source",
+            ),
+            {"status": "generation_failed", "error": str(exc)},
+        )
+
+    selected_generator = generated.generator
+    source_identity = sbom_source_identity or f"cli:{selected_generator}"
+    return (
+        ResolvedMetadata(
+            provided=True,
+            content=generated.payload,
+            content_type=CLOUDSMITH_SBOM_CONTENT_TYPE,
+            source_identity=source_identity,
+            source_label=f"{selected_generator}:scan-source",
+        ),
+        None,
     )
 
 
@@ -139,12 +228,15 @@ def resolve_push_metadata_options(
         metadata_content_file is not None or metadata_content is not None
     )
     if not metadata_provided:
-        if metadata_content_type or metadata_source_identity:
+        if metadata_content_type is not None or metadata_source_identity is not None:
             raise click.UsageError(
                 "Add --metadata-content-file or --metadata-content when using "
                 "--metadata-content-type or --metadata-source-identity."
             )
         return ResolvedMetadata(provided=False, content=None), None
+
+    if metadata_source_identity == "":
+        raise click.UsageError("--metadata-source-identity cannot be empty.")
 
     require_metadata_content_type(
         content_type=metadata_content_type,
@@ -246,6 +338,60 @@ def _print_metadata_retry_hint(
     click.secho(" \\\n".join(parts), fg="yellow", err=True)
 
 
+def _post_upload_sbom_failure_context(
+    *,
+    owner,
+    repo,
+    slug,
+    slug_perm,
+    source_identity,
+):
+    """Describe an accepted package and a safe SBOM retry for JSON output."""
+    target = f"{owner}/{repo}/{slug_perm}"
+    retry_command = (
+        f"cloudsmith sbom add {shlex.quote(target)} --file PATH_TO_SBOM_JSON"
+    )
+    if source_identity:
+        retry_command += f" --source-identity {shlex.quote(source_identity)}"
+
+    return {
+        "package_created": True,
+        "package": {
+            "slug": slug,
+            "slug_perm": slug_perm,
+            "target": target,
+        },
+        "retry": {
+            "command": retry_command,
+            "hint": (
+                "The package remains published. Regenerate the SBOM to a "
+                "file, then attach that file to the created package."
+            ),
+        },
+    }
+
+
+def _print_post_upload_sbom_retry_hint(opts, failure_context):
+    """Explain safe recovery after a generated SBOM fails to attach."""
+    if utils.should_use_stderr(opts):
+        return
+
+    package_target = failure_context["package"]["target"]
+    retry_command = failure_context["retry"]["command"]
+    click.echo(err=True)
+    click.secho(
+        f"Package {package_target} remains published without its SBOM.",
+        fg="yellow",
+        err=True,
+    )
+    click.secho(
+        "Regenerate the SBOM to a file, then attach it with:",
+        fg="yellow",
+        err=True,
+    )
+    click.secho(retry_command, fg="yellow", err=True)
+
+
 def validate_metadata_payload(
     ctx,
     opts,
@@ -304,6 +450,8 @@ def validate_metadata_payload(
             )
         else:
             message = f"Metadata content failed validation: {detail}"
+        if http_status == 413 and content_type == CLOUDSMITH_SBOM_CONTENT_TYPE:
+            message = f"{message} {SBOM_METADATA_SIZE_LIMIT_HINT}"
         failure_info = {
             "status": "validation_failed",
             "http_status": http_status,
@@ -349,6 +497,7 @@ def attach_metadata_to_package(
     metadata_content_file=None,
     cli_content_type=None,
     cli_source_identity=None,
+    is_sbom=False,
 ):
     """Attach a metadata entry to a freshly-created package.
 
@@ -393,6 +542,8 @@ def attach_metadata_to_package(
             )
         else:
             message = f"Could not attach metadata to package {slug_perm}: {detail}"
+        if http_status == 413 and content_type == CLOUDSMITH_SBOM_CONTENT_TYPE:
+            message = f"{message} {SBOM_METADATA_SIZE_LIMIT_HINT}"
         failure_info = {
             "status": "attach_failed",
             "http_status": http_status,
@@ -408,10 +559,23 @@ def attach_metadata_to_package(
             "cli_content_type": cli_content_type,
             "cli_source_identity": cli_source_identity,
         }
+        sbom_failure_context = None
+        if is_sbom:
+            sbom_failure_context = _post_upload_sbom_failure_context(
+                owner=owner,
+                repo=repo,
+                slug=slug,
+                slug_perm=slug_perm,
+                source_identity=source_identity,
+            )
+            failure_info.update(sbom_failure_context)
 
         if not _metadata_failure_is_warn(opts):
             opts.push_metadata_info = failure_info
-            _print_metadata_retry_hint(**hint_kwargs)
+            if sbom_failure_context:
+                _print_post_upload_sbom_retry_hint(opts, sbom_failure_context)
+            else:
+                _print_metadata_retry_hint(**hint_kwargs)
             _handle_metadata_api_exception(
                 ctx,
                 opts,
@@ -430,7 +594,10 @@ def attach_metadata_to_package(
             fg="yellow",
             err=True,
         )
-        _print_metadata_retry_hint(**hint_kwargs)
+        if sbom_failure_context:
+            _print_post_upload_sbom_retry_hint(opts, sbom_failure_context)
+        else:
+            _print_metadata_retry_hint(**hint_kwargs)
         return failure_info
 
     click.secho("OK", fg="green", err=use_stderr)
@@ -822,6 +989,7 @@ def upload_files_and_create_package(
     metadata_source_identity=None,
     metadata=None,
     metadata_failure_info=None,
+    metadata_is_sbom=False,
     **kwargs,
 ):
     """Upload package files and create a new package."""
@@ -983,20 +1151,32 @@ def upload_files_and_create_package(
             metadata_content_file=metadata.content_file,
             cli_content_type=metadata.content_type,
             cli_source_identity=metadata_source_identity,
+            is_sbom=metadata_is_sbom,
         )
     elif metadata.provided:
-        # Metadata resolution/validation already warned the user; the payload
-        # is broken so a straight retry would fail. Use the "fix first" hint.
-        _print_metadata_retry_hint(
-            opts=opts,
-            owner=owner,
-            repo=repo,
-            slug=slug,
-            metadata_content_file=metadata.content_file,
-            cli_content_type=metadata.content_type,
-            cli_source_identity=metadata_source_identity,
-            reason="validation_failed",
-        )
+        # Metadata resolution/validation already warned the user. Now that the
+        # package target is known, provide the appropriate recovery guidance.
+        if metadata_is_sbom:
+            failure_context = _post_upload_sbom_failure_context(
+                owner=owner,
+                repo=repo,
+                slug=slug,
+                slug_perm=slug_perm,
+                source_identity=metadata.source_identity,
+            )
+            opts.push_metadata_info.update(failure_context)
+            _print_post_upload_sbom_retry_hint(opts, failure_context)
+        else:
+            _print_metadata_retry_hint(
+                opts=opts,
+                owner=owner,
+                repo=repo,
+                slug=slug,
+                metadata_content_file=metadata.content_file,
+                cli_content_type=metadata.content_type,
+                cli_source_identity=metadata_source_identity,
+                reason="validation_failed",
+            )
 
     if no_wait_for_sync:
         return slug_perm, slug
@@ -1158,6 +1338,49 @@ def create_push_handlers():  # noqa: C901
             ),
         )
         @click.option(
+            "--sbom",
+            "generate_sbom",
+            is_flag=True,
+            default=False,
+            help=(
+                "Generate an SBOM and attach it to the uploaded package as "
+                "custom metadata. Requires the selected external generator "
+                "on PATH. Uses Syft and CycloneDX JSON 1.6 by default."
+            ),
+        )
+        @click.option(
+            "--sbom-source",
+            default=None,
+            help=(
+                "Directory, archive, or image to scan. Defaults to the current "
+                "directory."
+            ),
+        )
+        @click.option(
+            "--sbom-generator",
+            type=click.Choice(GENERATOR_NAMES),
+            default=None,
+            help=(
+                "External generator on PATH. Defaults to syft; 'auto' prefers "
+                "Syft, then falls back to another installed, compatible "
+                "generator that supports the requested format."
+            ),
+        )
+        @click.option(
+            "--sbom-format",
+            type=click.Choice(SBOM_FORMATS),
+            default=None,
+            help="Generated SBOM format. Defaults to cyclonedx-json.",
+        )
+        @click.option(
+            "--sbom-source-identity",
+            default=None,
+            help=(
+                "Identifier describing where the SBOM originated. Defaults to "
+                "'cli:<selected-generator>'."
+            ),
+        )
+        @click.option(
             "--on-metadata-failure",
             METADATA_FAILURE_MODE_KWARG,
             type=click.Choice(["error", "warn"]),
@@ -1190,6 +1413,7 @@ def create_push_handlers():  # noqa: C901
             metadata_kwargs = {
                 key: kwargs.pop(key, None) for key in METADATA_KWARG_NAMES
             }
+            sbom_kwargs = {key: kwargs.pop(key, None) for key in SBOM_KWARG_NAMES}
 
             # ``--on-metadata-failure`` is also not a package-create kwarg;
             # publish it onto opts so the failure-mode helper can prefer it
@@ -1208,8 +1432,19 @@ def create_push_handlers():  # noqa: C901
             # N times) is almost never what the user wants. Force them to
             # push files individually with metadata, or drop the flags.
             metadata_flags_set = any(
-                metadata_kwargs.get(k) for k in METADATA_KWARG_NAMES
+                value is not None for value in metadata_kwargs.values()
             )
+            sbom_flags_set = bool(sbom_kwargs["generate_sbom"]) or any(
+                value is not None
+                for key, value in sbom_kwargs.items()
+                if key != "generate_sbom"
+            )
+            if metadata_flags_set and sbom_flags_set:
+                raise click.UsageError(
+                    "--sbom cannot be combined with --metadata-content-file, "
+                    "--metadata-content, --metadata-content-type, or "
+                    "--metadata-source-identity."
+                )
             if len(package_files) > 1 and metadata_flags_set:
                 raise click.UsageError(
                     "Metadata flags (--metadata-content-file, --metadata-content, "
@@ -1217,10 +1452,21 @@ def create_push_handlers():  # noqa: C901
                     "be combined with multiple package files. Push files "
                     "individually when attaching metadata."
                 )
+            if len(package_files) > 1 and sbom_flags_set:
+                raise click.UsageError(
+                    "--sbom and its related options cannot be combined with "
+                    "multiple package files. Push files individually when "
+                    "generating an SBOM."
+                )
 
-            metadata, metadata_failure_info = resolve_push_metadata_options(
-                **metadata_kwargs, opts=opts
-            )
+            if sbom_flags_set:
+                metadata, metadata_failure_info = resolve_push_sbom_options(
+                    **sbom_kwargs, opts=opts
+                )
+            else:
+                metadata, metadata_failure_info = resolve_push_metadata_options(
+                    **metadata_kwargs, opts=opts
+                )
 
             results = []
             for package_file in package_files:
@@ -1235,6 +1481,7 @@ def create_push_handlers():  # noqa: C901
                         **metadata_kwargs,
                         metadata=metadata,
                         metadata_failure_info=metadata_failure_info,
+                        metadata_is_sbom=sbom_flags_set,
                     )
                     if res:
                         # ``upload_files_and_create_package`` resets and then
@@ -1242,6 +1489,12 @@ def create_push_handlers():  # noqa: C901
                         # so reading it here always reflects this iteration.
                         results.append((res, opts.push_metadata_info))
                 except ApiException:
+                    if sbom_flags_set and utils.should_use_stderr(opts):
+                        # ``--sbom`` is restricted to one package per
+                        # invocation. The standard API handler has already
+                        # emitted its JSON error document, so stop here rather
+                        # than appending a second result document.
+                        return
                     click.secho(
                         "Skipping error and moving on.",
                         fg="yellow",

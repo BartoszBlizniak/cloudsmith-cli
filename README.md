@@ -490,6 +490,28 @@ Generation requires a supported external tool on `PATH`: Syft v1.49.0 for
 CycloneDX or SPDX, or Trivy v0.72.0 for SPDX. `--generator auto` selects the
 first installed, compatible tool.
 
+### Publish with an SBOM
+
+Add `--sbom` to any existing format-specific push command:
+
+```shell
+cloudsmith push raw your-org/your-repo artifact.tar.gz \
+  --name example --version 1.0.0 --sbom
+```
+
+Syft, CycloneDX JSON 1.6, and the current directory are the defaults. Override
+them when needed:
+
+```shell
+cloudsmith push raw your-org/your-repo artifact.tar.gz \
+  --name example --version 1.0.0 --sbom \
+  --sbom-source ./dist --sbom-generator trivy --sbom-format spdx-json
+```
+
+Generation, validation, and attachment fail the command by default. Use
+`--on-metadata-failure warn` to keep a successful package upload when SBOM
+attachment fails.
+
 ### Generate or attach separately
 
 `sbom generate` runs locally and writes raw JSON to a file or stdout:
