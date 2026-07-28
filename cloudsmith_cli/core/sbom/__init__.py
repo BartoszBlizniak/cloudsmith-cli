@@ -71,8 +71,17 @@ def validate_sbom(payload: dict[str, Any]) -> tuple[str, str]:
 
 
 def exceeds_metadata_size(payload: Any) -> bool:
-    """Return True if the JSON payload would exceed the metadata size cap."""
-    return len(json.dumps(payload).encode("utf-8")) > SBOM_METADATA_MAX_BYTES
+    """Return True if the metadata request body would exceed the size cap.
+
+    The server limit applies to the whole request body, so the document is
+    measured inside the same envelope the attach call sends.
+    """
+    body = {
+        "content": payload,
+        "content_type": CLOUDSMITH_SBOM_CONTENT_TYPE,
+        "source_identity": DEFAULT_SBOM_SOURCE_IDENTITY,
+    }
+    return len(json.dumps(body).encode("utf-8")) > SBOM_METADATA_MAX_BYTES
 
 
 def ensure_within_metadata_size(payload: Any) -> None:

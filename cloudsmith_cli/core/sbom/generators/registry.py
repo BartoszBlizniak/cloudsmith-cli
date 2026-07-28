@@ -54,7 +54,8 @@ def get_generator(name: str, output_format: str | None = None) -> ExternalGenera
                 f"'{output_format}'. Install Syft or select a supported format."
             )
         raise GeneratorProviderError(
-            "No supported SBOM generator is installed. Install Syft or Trivy."
+            "No supported SBOM generator is installed. Install Syft, or select "
+            "another generator with --generator."
         )
 
     provider_type = _GENERATORS.get(name)

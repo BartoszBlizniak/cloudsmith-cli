@@ -98,11 +98,13 @@ def test_sbom_help_describes_generator_and_raw_output_contract():
     result = CliRunner().invoke(sbom_, ["generate", "--help"], terminal_width=120)
 
     assert result.exit_code == 0, result.output
-    assert "The generator must be installed" in result.output
-    assert "PATH." in result.output
-    assert "'auto' prefers Syft" in result.output
-    assert "installed, compatible generator" in result.output
-    assert "'-' for stdout" in result.output
+    # Help text wraps, so compare against whitespace-normalized output.
+    help_text = " ".join(result.output.split())
+    assert "The generator must be installed on PATH" in help_text
+    assert "'auto' selects an installed generator" in help_text
+    assert "Defaults to a format the selected generator supports" in help_text
+    assert "'-' for stdout" in help_text
+    assert "trivy" not in help_text.replace("[auto|syft|trivy]", "")
 
 
 def test_sbom_add_help_describes_stdin_and_digest_safety():
@@ -475,7 +477,7 @@ def test_list_pretty_output_has_clear_empty_state(_mock_resolve, mock_list_metad
     result = CliRunner().invoke(sbom_, ["list", "org/repo/example"])
 
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "Results: 0 SBOMs visible"
+    assert "Results: 0 SBOMs visible" in result.output
 
 
 def test_get_requires_a_metadata_slug():
@@ -697,9 +699,7 @@ def test_add_json_api_error_emits_one_document(_mock_resolve, tmp_path):
         ],
     )
 
-    # HTTP status is carried in the JSON envelope; the process exit code is a
-    # stable 1 (an HTTP status is not a valid exit code).
-    assert result.exit_code == 1
+    assert result.exit_code == 404
     output = json.loads(result.stdout)
     assert output["detail"] == "Package not found"
     assert output["help"]["context"] == "Could not attach SBOM."
@@ -875,3 +875,16 @@ def test_remove_rejects_non_sbom_metadata(_mock_resolve, mock_get):
     result = CliRunner().invoke(sbom_, ["remove", "org/repo/example", "meta-1", "-y"])
     assert result.exit_code != 0
     assert "not a supported SBOM" in result.output
+
+
+@patch(
+    "cloudsmith_cli.cli.commands.sbom.get_package",
+    side_effect=ApiException(status=404, detail="Package not found"),
+)
+def test_list_exits_non_zero_on_an_api_error(_mock_resolve):
+    # AliasGroup runs Click with standalone_mode=False, which discards
+    # ctx.exit(); a failed command must still report failure to CI.
+    result = CliRunner().invoke(sbom_, ["list", "org/repo/missing"])
+
+    assert result.exit_code == 404
+    assert "Could not list SBOMs" in result.output

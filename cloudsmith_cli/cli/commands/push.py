@@ -1366,8 +1366,8 @@ def create_push_handlers():  # noqa: C901
             default=False,
             help=(
                 "Generate an SBOM and attach it to the uploaded package as "
-                "custom metadata. Requires the selected external generator "
-                "on PATH. Uses Syft and CycloneDX JSON 1.6 by default."
+                "custom metadata. Requires the selected generator on PATH. "
+                "Uses Syft and CycloneDX JSON 1.6 by default."
             ),
         )
         @click.option(
@@ -1383,9 +1383,9 @@ def create_push_handlers():  # noqa: C901
             type=click.Choice(GENERATOR_NAMES),
             default=None,
             help=(
-                "External generator on PATH. Defaults to syft; 'auto' prefers "
-                "Syft, then falls back to another installed, compatible "
-                "generator that supports the requested format."
+                "SBOM generator to run. The generator must be installed on "
+                "PATH. Defaults to syft; 'auto' selects an installed generator "
+                "that supports the requested format."
             ),
         )
         @click.option(
@@ -1393,8 +1393,8 @@ def create_push_handlers():  # noqa: C901
             type=click.Choice(SBOM_FORMATS),
             default=None,
             help=(
-                "Generated SBOM format. Defaults to cyclonedx-json "
-                "(spdx-json when the generator is trivy)."
+                "Generated SBOM format. Defaults to a format the selected "
+                "generator supports."
             ),
         )
         @click.option(
@@ -1402,8 +1402,8 @@ def create_push_handlers():  # noqa: C901
             type=click.Choice(SOURCE_TYPES),
             default=SOURCE_TYPE_AUTO,
             help=(
-                "How to interpret the scan source. 'auto' infers directory vs "
-                "image; use 'image' to scan a local image archive as an image."
+                "How to interpret the scan source. 'auto' infers a directory "
+                "or an image; 'image' scans a local image archive as an image."
             ),
         )
         @click.option(
