@@ -227,7 +227,7 @@ def test_auto_reports_each_incompatible_provider(mock_syft, mock_trivy):
 def test_auto_requires_an_installed_generator(_mock_syft, _mock_trivy):
     with pytest.raises(
         GeneratorProviderError,
-        match=r"No supported SBOM generator is installed\. Install Syft",
+        match=r"No supported SBOM generator is installed\. Install Syft, then try again\.",
     ):
         get_generator("auto", output_format="spdx-json")
 

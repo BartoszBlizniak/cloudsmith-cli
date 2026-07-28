@@ -200,8 +200,12 @@ def resolve_push_sbom_options(
             output_format=output_format,
             source_type=source_type,
         )
+        # Record which generator and version actually produced the document.
+        selected_identity = sbom_source_identity or (
+            f"cli:{generated.generator}@{generated.generator_version}"
+        )
         # Fail fast before upload rather than a 413 after a multi-minute scan.
-        ensure_within_metadata_size(generated.payload)
+        ensure_within_metadata_size(generated.payload, selected_identity)
     except SbomError as exc:
         if not _metadata_failure_is_warn(opts):
             raise click.ClickException(str(exc)) from exc
@@ -216,17 +220,13 @@ def resolve_push_sbom_options(
             {"status": "generation_failed", "error": str(exc)},
         )
 
-    selected_generator = generated.generator
-    source_identity = sbom_source_identity or (
-        f"cli:{selected_generator}@{generated.generator_version}"
-    )
     return (
         ResolvedMetadata(
             provided=True,
             content=generated.payload,
             content_type=CLOUDSMITH_SBOM_CONTENT_TYPE,
-            source_identity=source_identity,
-            source_label=f"{selected_generator}:scan-source",
+            source_identity=selected_identity,
+            source_label=f"{generated.generator}:scan-source",
         ),
         None,
     )

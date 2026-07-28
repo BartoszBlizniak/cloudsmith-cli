@@ -70,23 +70,29 @@ def validate_sbom(payload: dict[str, Any]) -> tuple[str, str]:
     return output_format, content_type
 
 
-def exceeds_metadata_size(payload: Any) -> bool:
+def exceeds_metadata_size(
+    payload: Any, source_identity: str = DEFAULT_SBOM_SOURCE_IDENTITY
+) -> bool:
     """Return True if the metadata request body would exceed the size cap.
 
     The server limit applies to the whole request body, so the document is
-    measured inside the same envelope the attach call sends.
+    measured inside the same envelope the attach call sends, using the source
+    identity that will actually be recorded. The result is an estimate: the
+    transport may encode the same body slightly differently.
     """
     body = {
         "content": payload,
         "content_type": CLOUDSMITH_SBOM_CONTENT_TYPE,
-        "source_identity": DEFAULT_SBOM_SOURCE_IDENTITY,
+        "source_identity": source_identity,
     }
     return len(json.dumps(body).encode("utf-8")) > SBOM_METADATA_MAX_BYTES
 
 
-def ensure_within_metadata_size(payload: Any) -> None:
-    """Raise before upload if the payload exceeds the metadata size cap."""
-    if exceeds_metadata_size(payload):
+def ensure_within_metadata_size(
+    payload: Any, source_identity: str = DEFAULT_SBOM_SOURCE_IDENTITY
+) -> None:
+    """Raise before upload if the metadata request body exceeds the size cap."""
+    if exceeds_metadata_size(payload, source_identity):
         raise SbomError(SBOM_METADATA_SIZE_LIMIT_HINT)
 
 

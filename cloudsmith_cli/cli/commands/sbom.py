@@ -433,7 +433,7 @@ def add_sbom(
         payload = metadata.content
         assert payload is not None
         validate_sbom(payload)
-        ensure_within_metadata_size(payload)
+        ensure_within_metadata_size(payload, source_identity)
     except SbomError as exc:
         raise click.ClickException(str(exc)) from exc
 

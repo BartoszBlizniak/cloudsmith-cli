@@ -215,3 +215,24 @@ def test_ensure_within_metadata_size_allows_small_payloads():
     from cloudsmith_cli.core.sbom import ensure_within_metadata_size
 
     ensure_within_metadata_size({"ok": True})
+
+
+def test_metadata_size_guard_accounts_for_the_request_envelope():
+    import json
+
+    from cloudsmith_cli.core.sbom import SBOM_METADATA_MAX_BYTES, exceeds_metadata_size
+
+    # The document alone fits under the cap, but the request body it is sent in
+    # does not, so measuring only the document would let a 413 through.
+    payload = {"blob": "x" * (SBOM_METADATA_MAX_BYTES - 100)}
+    assert len(json.dumps(payload).encode("utf-8")) < SBOM_METADATA_MAX_BYTES
+    assert exceeds_metadata_size(payload, "cli:syft@1.49.0") is True
+
+
+def test_metadata_size_guard_uses_the_supplied_source_identity():
+    from cloudsmith_cli.core.sbom import SBOM_METADATA_MAX_BYTES, exceeds_metadata_size
+
+    # Sized so only the longer identity tips it over the cap.
+    payload = {"blob": "x" * (SBOM_METADATA_MAX_BYTES - 130)}
+    assert exceeds_metadata_size(payload, "c") is False
+    assert exceeds_metadata_size(payload, "i" * 128) is True
