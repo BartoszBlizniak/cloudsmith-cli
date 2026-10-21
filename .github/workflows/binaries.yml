@@ -319,8 +319,13 @@ jobs:
           EXPECTED_VERSION=$(cat cloudsmith_cli/data/VERSION)
           export EXPECTED_VERSION
           tar -xzf "dl/${ART}" -C .
+          # Run the images at the same time. Each one logs to its own file,
+          # which is printed after all of them finish.
           ASSERT_NO_PYTHON=1
+          N=0
+          PIDS=()
           for IMAGE in ${TEST_IMAGES}; do
+            N=$((N + 1))
             docker run --rm \
               -e ASSERT_NO_PYTHON="${ASSERT_NO_PYTHON}" \
               -e EXPECTED_VERSION \
@@ -335,9 +340,25 @@ jobs:
                   done
                 fi
                 sh packaging/smoketest.sh cloudsmith/cloudsmith offline
-              '
+              ' > "${RUNNER_TEMP}/smoketest-${N}.log" 2>&1 &
+            PIDS+=("$!")
             ASSERT_NO_PYTHON=0
           done
+          FAILED=0
+          N=0
+          for IMAGE in ${TEST_IMAGES}; do
+            RC=0
+            wait "${PIDS[${N}]}" || RC=$?
+            N=$((N + 1))
+            echo "::group::${IMAGE} (exit ${RC})"
+            cat "${RUNNER_TEMP}/smoketest-${N}.log"
+            echo "::endgroup::"
+            if [ "${RC}" -ne 0 ]; then
+              echo "::error::offline smoketest failed in ${IMAGE}"
+              FAILED=1
+            fi
+          done
+          test "${FAILED}" = 0
           if [ -n "${ONLINE}" ] && [ -n "${CLOUDSMITH_API_KEY:-}" ]; then
             IMAGE=${TEST_IMAGES%% *}
             docker run --rm \
