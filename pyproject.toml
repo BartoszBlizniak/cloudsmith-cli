@@ -89,6 +89,7 @@ dev = [
     "pre-commit",
     "pylint",
     "pytest-cov",
+    "pytest-xdist",
     "freezegun",
     "ty",
     "httpretty",

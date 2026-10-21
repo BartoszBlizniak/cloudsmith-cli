@@ -48,7 +48,7 @@ jobs:
         id: pytest
         env:
           COVERAGE_ARGS: ${{ matrix.python-version == '3.12' && '--cov=cloudsmith_cli' || '' }}
-        run: uv run pytest -m "not integration" ${COVERAGE_ARGS} --junitxml=./reports/pytest.xml
+        run: uv run pytest -m "not integration" -n auto ${COVERAGE_ARGS} --junitxml=./reports/pytest.xml
 
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
