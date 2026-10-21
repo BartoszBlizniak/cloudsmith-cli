@@ -93,6 +93,7 @@ dev = [
     "ty",
     "httpretty",
     "bumpversion",
+    "pytest-xdist",
 ]
 binary = [
     "pyinstaller==6.22.3",

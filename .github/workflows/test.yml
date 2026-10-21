@@ -112,7 +112,10 @@ jobs:
           PYTEST_CLOUDSMITH_ORGANIZATION: ${{ vars.PYTEST_CLOUDSMITH_ORGANIZATION }}
           PYTEST_CLOUDSMITH_USERNAME: ${{ secrets.PYTEST_CLOUDSMITH_USERNAME }}
           PYTEST_CLOUDSMITH_PASSWORD: ${{ secrets.PYTEST_CLOUDSMITH_PASSWORD }}
-        run: uv run pytest -m integration --junitxml=./reports/pytest.xml
+        # The tests wait on the network, not the CPU, and each one creates its own
+        # temporary repository or randomly named resources, so they can run in
+        # parallel.
+        run: uv run pytest -m integration -n 4 --dist worksteal --junitxml=./reports/pytest.xml
 
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
