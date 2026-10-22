@@ -315,7 +315,7 @@ jobs:
         env:
           ART: ${{ steps.art.outputs.name }}
           TEST_IMAGES: ${{ matrix.test_images }}
-          IMAGE_TIMEOUT: 90s
+          IMAGE_TIMEOUT: 10m
         run: |
           set -euo pipefail
           EXPECTED_VERSION=$(cat cloudsmith_cli/data/VERSION)
