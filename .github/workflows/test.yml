@@ -118,7 +118,7 @@ jobs:
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
         run: |
           python .github/scripts/junit_summary.py ./reports/pytest.xml \
-            "Live integration tests" >> "$GITHUB_STEP_SUMMARY"
+            "Live integration tests" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
