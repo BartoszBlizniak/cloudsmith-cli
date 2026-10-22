@@ -114,6 +114,20 @@ jobs:
           PYTEST_CLOUDSMITH_PASSWORD: ${{ secrets.PYTEST_CLOUDSMITH_PASSWORD }}
         run: uv run pytest -m integration --junitxml=./reports/pytest.xml
 
+      - name: Summarise test results
+        if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
+        env:
+          # Names the shard in the heading when the job runs as a matrix shard.
+          MATRIX: ${{ toJSON(matrix) }}
+        run: |
+          TITLE="Live integration tests"
+          SHARD=$(jq -r '.shard // empty' <<<"${MATRIX}")
+          if [ -n "${SHARD}" ]; then
+            TITLE="${TITLE} (${SHARD})"
+          fi
+          python .github/scripts/junit_summary.py ./reports/pytest.xml \
+            "${TITLE}" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
