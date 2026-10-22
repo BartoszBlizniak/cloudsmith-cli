@@ -77,8 +77,9 @@ jobs:
           uv run --group release check-wheel-contents dist/*.whl
           python .github/scripts/check_wheel.py
 
+  # Builds don't wait for the inputs check. Tests and the OIDC check still need
+  # it, so nothing is tested or released from inputs that failed it.
   matrix:
-    needs: inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -240,7 +241,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    needs: [matrix, build]
+    needs: [inputs, matrix, build]
     strategy:
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix: ${{ fromJson(needs.matrix.outputs.include) }}
@@ -314,14 +315,40 @@ jobs:
         env:
           ART: ${{ steps.art.outputs.name }}
           TEST_IMAGES: ${{ matrix.test_images }}
+          IMAGE_TIMEOUT: 10m
         run: |
           set -euo pipefail
           EXPECTED_VERSION=$(cat cloudsmith_cli/data/VERSION)
           export EXPECTED_VERSION
           tar -xzf "dl/${ART}" -C .
+          # Run the images at the same time. Each image logs to its own file,
+          # which is printed as soon as that image finishes. An image that runs
+          # longer than IMAGE_TIMEOUT is stopped and fails the job.
+          declare -A IMAGE_OF=()
+          declare -A NAME_OF=()
+          print_log() {
+            echo "::group::${IMAGE_OF[$1]} (${2})"
+            cat "${RUNNER_TEMP}/${NAME_OF[$1]}.log"
+            echo "::endgroup::"
+          }
+          # If the job is cancelled or times out, print what each unfinished
+          # image has logged so far and remove its container.
+          on_cancel() {
+            for PID in "${!IMAGE_OF[@]}"; do
+              print_log "${PID}" "interrupted"
+              docker rm -f "${NAME_OF[${PID}]}" >/dev/null 2>&1 || true
+            done
+            exit 1
+          }
+          trap on_cancel INT TERM
           ASSERT_NO_PYTHON=1
+          N=0
           for IMAGE in ${TEST_IMAGES}; do
-            docker run --rm \
+            N=$((N + 1))
+            NAME="smoketest-${N}"
+            # The single-quoted script expands inside the container.
+            # shellcheck disable=SC2016
+            timeout --kill-after=30s "${IMAGE_TIMEOUT}" docker run --rm --name "${NAME}" \
               -e ASSERT_NO_PYTHON="${ASSERT_NO_PYTHON}" \
               -e EXPECTED_VERSION \
               -v "${PWD}:/w" -w /w \
@@ -335,9 +362,30 @@ jobs:
                   done
                 fi
                 sh packaging/smoketest.sh cloudsmith/cloudsmith offline
-              '
+              ' > "${RUNNER_TEMP}/${NAME}.log" 2>&1 &
+            IMAGE_OF[$!]="${IMAGE}"
+            NAME_OF[$!]="${NAME}"
             ASSERT_NO_PYTHON=0
           done
+          FAILED=0
+          while [ "${#IMAGE_OF[@]}" -gt 0 ]; do
+            RC=0
+            wait -n -p PID "${!IMAGE_OF[@]}" || RC=$?
+            case "${RC}" in
+              0) STATUS="passed" ;;
+              124 | 137) STATUS="timed out after ${IMAGE_TIMEOUT}" ;;
+              *) STATUS="exit ${RC}" ;;
+            esac
+            print_log "${PID}" "${STATUS}"
+            if [ "${RC}" -ne 0 ]; then
+              docker rm -f "${NAME_OF[${PID}]}" >/dev/null 2>&1 || true
+              echo "::error::offline smoketest failed in ${IMAGE_OF[${PID}]} (${STATUS})"
+              FAILED=1
+            fi
+            unset "IMAGE_OF[${PID}]" "NAME_OF[${PID}]"
+          done
+          trap - INT TERM
+          test "${FAILED}" = 0
           if [ -n "${ONLINE}" ] && [ -n "${CLOUDSMITH_API_KEY:-}" ]; then
             IMAGE=${TEST_IMAGES%% *}
             docker run --rm \
@@ -379,7 +427,7 @@ jobs:
           fi
 
   oidc:
-    needs: [matrix, build]
+    needs: [inputs, matrix, build]
     if: ${{ inputs.online_smoketest }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
