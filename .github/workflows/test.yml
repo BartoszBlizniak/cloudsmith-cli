@@ -125,6 +125,12 @@ jobs:
           SELECT: ${{ matrix.select }}
         run: uv run pytest -m integration -k "${SELECT}" --junitxml=./reports/pytest.xml
 
+      - name: Summarise test results
+        if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
+        run: |
+          python .github/scripts/junit_summary.py ./reports/pytest.xml \
+            "Live integration tests" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
