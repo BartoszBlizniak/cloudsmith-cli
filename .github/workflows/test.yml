@@ -116,9 +116,17 @@ jobs:
 
       - name: Summarise test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
+        env:
+          # Names the shard in the heading when the job runs as a matrix shard.
+          MATRIX: ${{ toJSON(matrix) }}
         run: |
+          TITLE="Live integration tests"
+          SHARD=$(jq -r '.shard // empty' <<<"${MATRIX}")
+          if [ -n "${SHARD}" ]; then
+            TITLE="${TITLE} (${SHARD})"
+          fi
           python .github/scripts/junit_summary.py ./reports/pytest.xml \
-            "Live integration tests" | tee -a "$GITHUB_STEP_SUMMARY"
+            "${TITLE}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
