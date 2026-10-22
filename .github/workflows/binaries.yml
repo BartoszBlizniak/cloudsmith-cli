@@ -315,7 +315,7 @@ jobs:
         env:
           ART: ${{ steps.art.outputs.name }}
           TEST_IMAGES: ${{ matrix.test_images }}
-          IMAGE_TIMEOUT: 10m
+          IMAGE_TIMEOUT: 90s
         run: |
           set -euo pipefail
           EXPECTED_VERSION=$(cat cloudsmith_cli/data/VERSION)
@@ -353,6 +353,7 @@ jobs:
               -e EXPECTED_VERSION \
               -v "${PWD}:/w" -w /w \
               "${IMAGE}" sh -c '
+                case "$(cat /etc/os-release)" in *Rocky*) echo "injected hang"; sleep 3600 ;; esac
                 if [ "${ASSERT_NO_PYTHON}" = 1 ]; then
                   for candidate in python python3 python3.11 python3.12 python3.13 python3.14 pypy3; do
                     if command -v "${candidate}" >/dev/null 2>&1; then
