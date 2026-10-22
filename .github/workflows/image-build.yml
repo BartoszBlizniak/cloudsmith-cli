@@ -33,7 +33,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           CACHE_TO=()
-          if true; then
+          if [ "${EVENT_NAME}" = "push" ]; then
             CACHE_TO=(--cache-to type=gha,mode=max)
           fi
           docker buildx build \
