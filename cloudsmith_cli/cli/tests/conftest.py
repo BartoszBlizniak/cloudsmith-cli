@@ -3,6 +3,7 @@ import os
 import click.testing
 import pytest
 
+from ...core.api.exceptions import ApiException
 from ...core.api.init import initialise_api
 from ...core.api.repos import create_repo, delete_repo
 from ...core.credentials.models import CredentialResult
@@ -70,6 +71,43 @@ def tmp_repository(organization, api_host, api_key):
     repo_data = create_repo(organization, {"name": random_str()})
     yield repo_data
     delete_repo(organization, repo_data["slug"])
+
+
+@pytest.fixture()
+def delete_created(request, monkeypatch, api_host, api_key):
+    """Delete, at teardown, what a test creates through a core API function.
+
+    ``delete_created(module, "create_x", delete_x, "slug")`` wraps
+    ``module.create_x`` so each successful create registers a finalizer that
+    calls ``delete_x(owner, data["slug"])``. A test that fails after creating
+    a resource through the CLI then no longer leaves it in the organization.
+    """
+
+    def watch(module, create_name, delete_func, id_key):
+        create_func = getattr(module, create_name)
+
+        def create_and_register(owner, *args, **kwargs):
+            data = create_func(owner, *args, **kwargs)
+            identifier = data[id_key]
+
+            def delete():
+                initialise_api(
+                    host=api_host,
+                    credential=CredentialResult(api_key=api_key, source_name="test"),
+                )
+                try:
+                    delete_func(owner, identifier)
+                except ApiException as exc:
+                    # 404: the test's own delete step already removed it.
+                    if exc.status != 404:
+                        raise
+
+            request.addfinalizer(delete)
+            return data
+
+        monkeypatch.setattr(module, create_name, create_and_register)
+
+    return watch
 
 
 @pytest.fixture()

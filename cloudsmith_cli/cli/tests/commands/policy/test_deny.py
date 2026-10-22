@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from .....core.api import orgs
 from ....commands.policy.deny import (
     create_deny_policy,
     delete_deny_policy,
@@ -75,8 +76,11 @@ def assert_output_matches_policy_config(output, config_file_path):
 
 @pytest.mark.usefixtures("set_api_key_env_var", "set_api_host_env_var")
 @pytest.mark.integration
-def test_deny_policy_commands(runner, organization, tmp_path):
+def test_deny_policy_commands(runner, organization, tmp_path, delete_created):
     """Test CRUD operations for deny policies."""
+    # Delete the policy at teardown even if an assertion below fails.
+    delete_created(orgs, "create_deny_policy", orgs.delete_deny_policy, "slug_perm")
+
     # Generate the deny policy configuration file.
     policy_name = random_str()
 

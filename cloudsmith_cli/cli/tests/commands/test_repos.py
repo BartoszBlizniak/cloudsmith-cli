@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ....core.api import repos as repos_api
 from ....core.api.exceptions import ApiException
 from ...commands.list_ import repos as list_repos
 from ...commands.main import main
@@ -106,8 +107,10 @@ def assert_output_is_equal_to_repo_config(output, organisation, repo_config_file
 
 @pytest.mark.usefixtures("set_api_key_env_var", "set_api_host_env_var")
 @pytest.mark.integration
-def test_repos_commands(runner, organization, tmp_path):
+def test_repos_commands(runner, organization, tmp_path, delete_created):
     """Test CRUD operations for repositories."""
+    # Delete the repository at teardown even if an assertion below fails.
+    delete_created(repos_api, "create_repo", repos_api.delete_repo, "slug")
 
     # Generate some random repository data.
     repository_name = random_str()

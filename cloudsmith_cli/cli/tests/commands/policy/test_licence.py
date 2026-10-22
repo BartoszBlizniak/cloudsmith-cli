@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from .....core.api import orgs
 from ....commands.policy.license import create, delete, ls, update
 from ...utils import random_bool, random_str
 
@@ -87,8 +88,12 @@ def assert_output_matches_policy_config(output, config_file_path):
 
 @pytest.mark.usefixtures("set_api_key_env_var", "set_api_host_env_var")
 @pytest.mark.integration
-def test_license_policy_commands(runner, organization, tmp_path):
+def test_license_policy_commands(runner, organization, tmp_path, delete_created):
     """Test CRUD operations for license policies."""
+    # Delete the policy at teardown even if an assertion below fails.
+    delete_created(
+        orgs, "create_license_policy", orgs.delete_license_policy, "slug_perm"
+    )
 
     # Generate the license policy configuration file.
     policy_name = random_str()
