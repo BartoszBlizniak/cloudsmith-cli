@@ -199,7 +199,7 @@ jobs:
             -v "${PWD}:/src" -w /src \
             "${BUILD_IMAGE}" bash -c '
               set -euo pipefail
-              dnf install -y gcc binutils file >/dev/null
+              dnf install -y --setopt=install_weak_deps=False --nodocs gcc binutils file >/dev/null
               uv sync --locked --no-dev --no-editable --group binary --extra all --managed-python --python "${PYTHON_VERSION}"
               uv run --no-sync pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
               MAXV="$(
