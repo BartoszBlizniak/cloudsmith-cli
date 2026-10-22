@@ -45,27 +45,80 @@ error_summary() {
       }' >&2
 }
 
-# Run a read-only online command; a 429 is the shared org throttling, not a
-# binary failure, so warn and pass.
+# Show why an online command failed: its error lines, or all of it with
+# SMOKETEST_DEBUG=1.
+failed_output() {
+  if [ "${SMOKETEST_DEBUG:-0}" = "1" ]; then
+    printf '%s\n' "$1" >&2
+  else
+    error_summary "$1"
+  fi
+}
+
+# A 429 reaching the smoketest means the CLI's own 429 retries (which honour
+# Retry-After) ran out. online_call waits and reruns the command until this
+# many seconds have passed since the first 429 of the run, then fails: a run
+# that is throttled throughout has validated nothing, so it must not pass.
+RATE_LIMIT_BUDGET="${SMOKETEST_RATE_LIMIT_BUDGET:-180}"
+RATE_LIMIT_BACKOFF=20
+RATE_LIMIT_MAX_WAIT=60
+RATE_LIMIT_DEADLINE=""
+
+# The CLI's final error once its 429 retries are spent: urllib3's RetryError on
+# the requests path, the HTTP reason phrase on the httpx (mcp) path. The
+# "Request was throttled (429): Retrying" notice alone does not count, as the
+# retried request can still end in a different error.
+is_rate_limited() {
+  printf '%s' "$1" | grep -Eq 'too many 429 error responses|Too Many Requests'
+}
+
+# Seconds to wait before a rerun: the last Retry-After the CLI reported, but at
+# least RATE_LIMIT_BACKOFF (the CLI has already waited out that Retry-After)
+# and at most RATE_LIMIT_MAX_WAIT.
+rate_limit_wait() {
+  _hint=$(printf '%s\n' "$1" \
+    | sed -n 's/.*Retrying after [^0-9]*\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+  _wait=$RATE_LIMIT_BACKOFF
+  if [ -n "$_hint" ] && [ "$_hint" -gt "$_wait" ]; then
+    _wait=$_hint
+  fi
+  [ "$_wait" -le "$RATE_LIMIT_MAX_WAIT" ] || _wait=$RATE_LIMIT_MAX_WAIT
+  echo "$_wait"
+}
+
+# Run a read-only online command; reruns it on a 429 (see RATE_LIMIT_BUDGET).
 # Asserts success without printing the raw response (PII / repo names). The
 # dep-error detector still sees the full output; SMOKETEST_DEBUG=1 prints it.
 online_call() {
   _label="$1"; shift
-  _out=$("$BIN" "$@" 2>&1) || {
-    if printf '%s' "$_out" | grep -Eq '429|rate limit|Too Many Requests'; then
-      echo "WARN: rate-limited (429) on ${_label}; shared org throttling, not a binary failure" >&2
-      return 0
+  _attempt=1
+  while :; do
+    _rc=0
+    _out=$("$BIN" "$@" 2>&1) || _rc=$?
+    # An import/dep error is never retried, whatever else the output says.
+    no_dep_error "$_out" "$_label"
+    [ "$_rc" -ne 0 ] || break
+    if ! is_rate_limited "$_out"; then
+      failed_output "$_out"
+      fail "online ${_label} failed (set SMOKETEST_DEBUG=1 for full output)"
     fi
-    if [ "${SMOKETEST_DEBUG:-0}" = "1" ]; then
-      printf '%s\n' "$_out" >&2
-    else
-      error_summary "$_out"
+    _now=$(date +%s)
+    [ -n "$RATE_LIMIT_DEADLINE" ] || RATE_LIMIT_DEADLINE=$((_now + RATE_LIMIT_BUDGET))
+    _left=$((RATE_LIMIT_DEADLINE - _now))
+    if [ "$_left" -le 0 ]; then
+      failed_output "$_out"
+      fail "online ${_label} rate-limited (429), could not validate: still throttled after the ${RATE_LIMIT_BUDGET}s retry budget"
     fi
-    fail "online ${_label} failed (set SMOKETEST_DEBUG=1 for full output)"
-  }
-  no_dep_error "$_out" "$_label"
+    _wait=$(rate_limit_wait "$_out")
+    [ "$_wait" -le "$_left" ] || _wait=$_left
+    echo "WARN: rate-limited (429) on ${_label} (attempt ${_attempt}); retrying in ${_wait}s, ${_left}s of retry budget left" >&2
+    sleep "$_wait"
+    _attempt=$((_attempt + 1))
+  done
   if [ "${SMOKETEST_DEBUG:-0}" = "1" ]; then
     printf '%s\n' "$_out" | head -15
+  elif [ "$_attempt" -gt 1 ]; then
+    echo "${_label}: OK (after ${_attempt} attempts)"
   else
     echo "${_label}: OK"
   fi
