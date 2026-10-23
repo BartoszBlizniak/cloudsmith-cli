@@ -103,6 +103,9 @@ jobs:
 
   build:
     needs: matrix
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix: ${{ fromJson(needs.matrix.outputs.include) }}
@@ -181,6 +184,12 @@ jobs:
             '
 
       - if: matrix.mode == 'glibc'
+        name: Log in to the builder image registry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - if: matrix.mode == 'glibc'
         env:
           ART: ${{ steps.art.outputs.name }}
           BUILD_IMAGE: ${{ matrix.build_image }}
@@ -199,7 +208,6 @@ jobs:
             -v "${PWD}:/src" -w /src \
             "${BUILD_IMAGE}" bash -c '
               set -euo pipefail
-              dnf install -y gcc binutils file >/dev/null
               uv sync --locked --no-dev --no-editable --group binary --extra all --managed-python --python "${PYTHON_VERSION}"
               uv run --no-sync pyinstaller --clean --noconfirm packaging/pyinstaller/cloudsmith.spec
               MAXV="$(

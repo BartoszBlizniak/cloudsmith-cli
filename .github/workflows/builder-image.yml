@@ -1,0 +1,73 @@
+name: Builder image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - packaging/builder/**
+      - .github/workflows/builder-image.yml
+  pull_request:
+    paths:
+      - packaging/builder/**
+      - .github/workflows/builder-image.yml
+
+permissions: {}
+
+concurrency:
+  group: builder-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and push
+        env:
+          ARCH: ${{ matrix.arch }}
+          OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${OWNER,,}/cloudsmith-cli-builder"
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker build --pull -f packaging/builder/almalinux8.Dockerfile -t "${IMAGE}:almalinux8-${ARCH}" packaging/builder
+          docker run --rm "${IMAGE}:almalinux8-${ARCH}" sh -c 'gcc --version | head -1; objdump --version | head -1; file --version | head -1; ldd --version | head -1'
+          docker push "${IMAGE}:almalinux8-${ARCH}"
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - name: Create manifest
+        env:
+          OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${OWNER,,}/cloudsmith-cli-builder"
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker buildx imagetools create -t "${IMAGE}:almalinux8" "${IMAGE}:almalinux8-amd64" "${IMAGE}:almalinux8-arm64"
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE}:almalinux8" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "Pin this in binaries-matrix.json: ${IMAGE}@${DIGEST}" | tee -a "$GITHUB_STEP_SUMMARY"
