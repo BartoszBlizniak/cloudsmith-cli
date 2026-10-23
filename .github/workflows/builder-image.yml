@@ -8,10 +8,6 @@ on:
     paths:
       - packaging/builder/**
       - .github/workflows/builder-image.yml
-  pull_request:
-    paths:
-      - packaging/builder/**
-      - .github/workflows/builder-image.yml
 
 permissions: {}
 
