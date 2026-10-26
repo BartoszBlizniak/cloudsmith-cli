@@ -111,6 +111,9 @@ def handle_api_exceptions(
             raise
 
         if exit_on_error:
+            from .usage_capture import record_api_status
+
+            record_api_status(ctx, exc.status)
             ctx.exit(exc.status or 1)
 
 
