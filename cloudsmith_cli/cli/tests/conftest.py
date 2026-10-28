@@ -3,11 +3,13 @@ import os
 import click.testing
 import pytest
 
+from ...core.api.exceptions import ApiException
 from ...core.api.init import initialise_api
+from ...core.api.packages import list_packages
 from ...core.api.repos import create_repo, delete_repo
 from ...core.credentials.models import CredentialResult
 from ..config import OPTIONS
-from .utils import random_str
+from .utils import random_str, wait_until
 
 
 def _get_env_var_or_skip(key):
@@ -61,6 +63,17 @@ def organization():
     return _get_env_var_or_skip("PYTEST_CLOUDSMITH_ORGANIZATION")
 
 
+def _repository_is_visible(organization, slug):
+    """Return whether the repository can be read yet (404 means not yet)."""
+    try:
+        list_packages(organization, slug, query=None, page=1, page_size=1)
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
+    return True
+
+
 @pytest.fixture()
 def tmp_repository(organization, api_host, api_key):
     """Yield a temporary repository."""
@@ -68,6 +81,15 @@ def tmp_repository(organization, api_host, api_key):
         host=api_host, credential=CredentialResult(api_key=api_key, source_name="test")
     )
     repo_data = create_repo(organization, {"name": random_str()})
+    # The service serves reads from replicas that can lag a creation, and
+    # answers 404 for a repository it has just created. Tests read the new
+    # repository straight away, so wait until it is visible: many tests
+    # starting together (one per CI shard) makes the lag longer.
+    wait_until(
+        lambda: _repository_is_visible(organization, repo_data["slug"]),
+        f"Repository {repo_data['slug']} was not visible after creation",
+        timeout=30.0,
+    )
     yield repo_data
     delete_repo(organization, repo_data["slug"])
 
