@@ -77,8 +77,9 @@ jobs:
           uv run --group release check-wheel-contents dist/*.whl
           python .github/scripts/check_wheel.py
 
+  # Does not wait for the inputs job so the builds start straight away. The inputs
+  # job is still a required part of the workflow result (and of release.yml).
   matrix:
-    needs: inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -88,15 +89,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # Every target runs on every event, pull requests included.
       - id: gen
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          MATRIX=$(
-            jq -c --arg event_name "${EVENT_NAME}" \
-              '{include: [.include[] | select($event_name != "pull_request" or .pr) | del(.pr)]}' \
-              .github/scripts/binaries-matrix.json
-          )
+          MATRIX=$(jq -c '{include: .include}' .github/scripts/binaries-matrix.json)
           test "$(echo "${MATRIX}" | jq '.include | length')" -gt 0
           echo "include=${MATRIX}" >> "$GITHUB_OUTPUT"
 
@@ -120,10 +116,15 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # The macos-x86_64 cache holds the cryptography wheel that uv builds from source with
+      # static OpenSSL (see below). It has its own cache key, derived from uv.lock plus this
+      # suffix, so a wheel built with other settings is never restored into it. Bump the
+      # suffix when the OpenSSL build settings change.
       - if: matrix.mode == 'native'
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          cache-suffix: ${{ matrix.name == 'macos-x86_64' && 'openssl-static-1' || '' }}
 
       - id: art
         shell: bash
@@ -134,13 +135,13 @@ jobs:
 
       # cryptography has no Intel macOS wheel, so uv builds it from source.
       # A dynamic build loads a libssl.3.dylib that PyInstaller can replace
-      # with an older copy. Static OpenSSL removes that dependency. Remove the
-      # cached build, because uv reuses it even when the build settings change.
+      # with an older copy. Static OpenSSL removes that dependency. uv reuses a
+      # cached build even when the build settings change, so the uv cache for
+      # this target is keyed with the "openssl-static-1" suffix above, and the
+      # frozen binary is checked for a dynamic libssl after the build.
       - if: matrix.name == 'macos-x86_64'
         shell: bash
-        run: |
-          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
-          uv cache clean cryptography
+        run: echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
 
       - if: matrix.mode == 'native'
         shell: bash
@@ -156,6 +157,23 @@ jobs:
             *.zip) (cd dist && 7z a -bso0 "../out/${ART}" cloudsmith) ;;
             *)     tar -czf "out/${ART}" -C dist cloudsmith ;;
           esac
+
+      - if: matrix.name == 'macos-x86_64'
+        name: Verify cryptography is statically linked against OpenSSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND=0
+          while IFS= read -r -d '' SO; do
+            FOUND=$((FOUND + 1))
+            echo "${SO}"
+            otool -L "${SO}"
+            if otool -L "${SO}" | grep -Eq 'lib(ssl|crypto)[.0-9]*\.dylib'; then
+              echo "FAIL: ${SO} links OpenSSL dynamically"
+              exit 1
+            fi
+          done < <(find dist/cloudsmith -path '*cryptography/hazmat/bindings/_rust*' \( -name '*.so' -o -name '*.dylib' \) -print0)
+          test "${FOUND}" -gt 0
 
       - if: matrix.mode == 'alpine'
         env:
@@ -319,8 +337,16 @@ jobs:
           EXPECTED_VERSION=$(cat cloudsmith_cli/data/VERSION)
           export EXPECTED_VERSION
           tar -xzf "dl/${ART}" -C .
+          LOGS="${RUNNER_TEMP}/smoketest-logs"
+          mkdir -p "${LOGS}"
+          # Every image runs at the same time, with the same assertions as before. The first
+          # image additionally proves there is no Python in the clean-room image.
+          PIDS=()
+          NAMES=()
           ASSERT_NO_PYTHON=1
+          N=0
           for IMAGE in ${TEST_IMAGES}; do
+            N=$((N + 1))
             docker run --rm \
               -e ASSERT_NO_PYTHON="${ASSERT_NO_PYTHON}" \
               -e EXPECTED_VERSION \
@@ -335,7 +361,9 @@ jobs:
                   done
                 fi
                 sh packaging/smoketest.sh cloudsmith/cloudsmith offline
-              '
+              ' > "${LOGS}/offline-${N}.log" 2>&1 &
+            PIDS+=("$!")
+            NAMES+=("${IMAGE%%@*}")
             ASSERT_NO_PYTHON=0
           done
           if [ -n "${ONLINE}" ] && [ -n "${CLOUDSMITH_API_KEY:-}" ]; then
@@ -346,8 +374,25 @@ jobs:
               -v "${PWD}:/w" -w /w \
               "${IMAGE}" sh -c '
                 sh packaging/smoketest.sh cloudsmith/cloudsmith online
-              '
+              ' > "${LOGS}/online.log" 2>&1 &
+            PIDS+=("$!")
+            NAMES+=("online (${IMAGE%%@*})")
           fi
+          FAILED=0
+          for IDX in "${!PIDS[@]}"; do
+            if wait "${PIDS[$IDX]}"; then
+              RESULT=PASS
+            else
+              RESULT=FAIL
+              FAILED=1
+            fi
+            LOG="${LOGS}/offline-$((IDX + 1)).log"
+            if [ "${NAMES[$IDX]%% *}" = online ]; then LOG="${LOGS}/online.log"; fi
+            echo "::group::${RESULT} ${NAMES[$IDX]}"
+            cat "${LOG}"
+            echo "::endgroup::"
+          done
+          exit "${FAILED}"
 
       - if: matrix.test_kind == 'macos'
         env:
