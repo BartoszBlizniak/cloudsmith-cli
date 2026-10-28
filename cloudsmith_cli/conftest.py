@@ -1,3 +1,5 @@
+import os
+
 import cloudsmith_api
 import pytest
 
@@ -88,3 +90,59 @@ def restore_default_proxy():
     """Clear the process-wide proxy that ``initialise_session`` sets."""
     yield
     session.set_default_proxy(None)
+
+
+#: CI splits the live integration tests across parallel jobs. Each job sets
+#: both variables; a run that sets neither (every local run) is not sharded.
+SHARD_INDEX_ENV = "PYTEST_SHARD_INDEX"
+SHARD_COUNT_ENV = "PYTEST_SHARD_COUNT"
+
+
+def shard_of(items, index, count):
+    """Return the items that belong to shard ``index`` of ``count`` (0-based).
+
+    Items are dealt out round-robin in node-id order, so the result depends
+    only on the set of tests, never on collection order or plugins. Every
+    test lands in exactly one shard, including tests added later, which is
+    what makes this safer than listing files per job. Neighbouring node ids
+    (the parameters of one test, the tests of one file) go to different
+    shards, which spreads the slow package tests rather than stacking them.
+    """
+    ordered = sorted(items, key=lambda item: item.nodeid)
+    return [item for position, item in enumerate(ordered) if position % count == index]
+
+
+def read_shard_settings(environ):
+    """Return ``(index, count)`` from the environment, or ``None`` if unset."""
+    raw_index = environ.get(SHARD_INDEX_ENV)
+    raw_count = environ.get(SHARD_COUNT_ENV)
+    if raw_index is None and raw_count is None:
+        return None
+    if raw_index is None or raw_count is None:
+        raise pytest.UsageError(
+            f"set both {SHARD_INDEX_ENV} and {SHARD_COUNT_ENV}, or neither"
+        )
+    try:
+        index, count = int(raw_index), int(raw_count)
+    except ValueError as exc:
+        raise pytest.UsageError(f"shard settings must be integers: {exc}") from exc
+    if count < 1 or not 0 <= index < count:
+        raise pytest.UsageError(
+            f"{SHARD_INDEX_ENV}={index} is outside 0..{count - 1} "
+            f"({SHARD_COUNT_ENV}={count})"
+        )
+    return index, count
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Keep only this job's share of the tests (after ``-m`` has deselected)."""
+    settings = read_shard_settings(os.environ)
+    if settings is None:
+        return
+    mine = set(shard_of(items, *settings))
+    kept = [item for item in items if item in mine]
+    dropped = [item for item in items if item not in mine]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = kept
