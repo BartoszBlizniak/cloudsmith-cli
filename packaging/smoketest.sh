@@ -100,7 +100,7 @@ run_offline() {
   VERSION_OUT=$("$BIN" --version) || fail "--version exited nonzero"
   printf '%s\n' "$VERSION_OUT"
   if [ -n "${EXPECTED_VERSION:-}" ]; then
-    printf '%s\n' "$VERSION_OUT" | grep -Fq "CLI Package Version: ${EXPECTED_VERSION}" \
+    printf '%s\n' "$VERSION_OUT" | grep -Fq "CLI Package Version: ${EXPECTED_VERSION}-BROKEN" \
       || fail "--version did not report ${EXPECTED_VERSION}"
   fi
 
