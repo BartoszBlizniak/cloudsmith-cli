@@ -1,0 +1,66 @@
+name: Dependency floors
+
+# The Test workflow runs against uv.lock, which is not what a customer gets
+# from pip. This installs the wheel with every dependency at the lowest
+# version pyproject.toml allows, then runs the smoke checks and the unit
+# tests. It fails when the code needs a newer release than a declared floor.
+# That can start with any code change, so it runs on every pull request.
+#
+# Not a required check: the declared floors for several dependencies are
+# currently wrong, so it fails until they are fixed. Make it required then.
+
+on:
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-floors-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lowest:
+    name: Lowest declared versions (Python 3.11.18)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Build the wheel
+        run: uv build --wheel --out-dir dist
+
+      - name: Install the declared floors
+        run: |
+          uv venv --managed-python --python 3.11.18 "${RUNNER_TEMP}/lowest"
+          # The wheel's own requirements are transitive to the resolver, so
+          # resolve the project dependencies directly from pyproject.toml.
+          uv pip install --python "${RUNNER_TEMP}/lowest/bin/python" \
+            --resolution lowest-direct --all-extras -r pyproject.toml
+          # Test tools come after, at their newest versions, so they cannot
+          # move a dependency off its floor (the smoke test below checks that).
+          uv pip install --python "${RUNNER_TEMP}/lowest/bin/python" \
+            pytest-cov freezegun httpretty
+          uv pip install --python "${RUNNER_TEMP}/lowest/bin/python" --no-deps dist/*.whl
+          uv pip check --python "${RUNNER_TEMP}/lowest/bin/python"
+          uv pip list --python "${RUNNER_TEMP}/lowest/bin/python"
+
+      - name: Smoke test the installed wheel at the floors
+        run: >-
+          "${RUNNER_TEMP}/lowest/bin/python" -I .github/scripts/smoke_installed.py
+          --pyproject pyproject.toml --expect-floors --declared-imports
+
+      - name: Run the unit tests at the floors
+        run: >-
+          "${RUNNER_TEMP}/lowest/bin/python" -m pytest -m "not integration"
+          -p no:cacheprovider

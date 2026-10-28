@@ -45,6 +45,15 @@ jobs:
           COVERAGE_ARGS: ${{ matrix.python-version == '3.12.16' && '--cov=cloudsmith_cli' || '' }}
         run: uv run pytest -m "not integration" ${COVERAGE_ARGS} --junitxml=./reports/pytest.xml
 
+      # Runs even when pytest failed, so one run reports both. Builds the
+      # wheel and installs it into clean venvs: what customers get, which
+      # `uv sync --locked` above cannot show.
+      - name: Clean-install smoke test of the built wheel
+        if: ${{ !cancelled() }}
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv run python .github/scripts/clean_install.py --python "${PYTHON_VERSION}"
+
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -80,6 +89,84 @@ jobs:
       - name: Run pytest
         run: uv run pytest cloudsmith_cli -m "windows and not integration"
 
+  # macOS is covered by test-macos.yml: its runners queue for long on busy
+  # days, and that must not hold up this workflow.
+
+  # Many tests assume POSIX paths and shell launchers, so the whole suite does
+  # not pass on Windows yet. Rather than leave Windows at the `windows`-marked
+  # subset above, this runs everything and fails on any failure that is not in
+  # the list of known ones: a test that passes today cannot start failing
+  # unnoticed. Fix a test, delete its line from the list.
+  pytest-windows-full:
+    name: Full unit suite on Windows, known failures excepted (Python 3.14)
+    runs-on: windows-2025
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev --python 3.14
+
+      - name: Run pytest
+        id: pytest
+        # The known failures make pytest exit non-zero; the next step decides.
+        continue-on-error: true
+        run: uv run pytest cloudsmith_cli -m "not integration" --junitxml=./reports/windows.xml
+
+      - name: Fail on failures that are not known
+        if: ${{ !cancelled() }}
+        run: uv run python .github/scripts/pytest_ratchet.py reports/windows.xml .github/windows-known-failures.txt
+
+      - name: Upload test results
+        if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results-windows-full
+          path: ./reports/windows.xml
+          retention-days: 30
+          if-no-files-found: error
+
+  clean-install-windows:
+    name: Clean-install smoke test on Windows (Python 3.14)
+    runs-on: windows-2025
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev --python 3.14
+
+      # Process start-up is slow on Windows runners, so the [all] install,
+      # which Linux and macOS cover, is skipped here.
+      - name: Clean-install smoke test of the built wheel
+        run: uv run python .github/scripts/clean_install.py --python 3.14 --skip-extras
+
   integration-gate:
     name: Check integration credentials
     runs-on: ubuntu-24.04
@@ -102,11 +189,17 @@ jobs:
           fi
 
   integration:
-    name: Live integration tests (Python 3.14.10)
+    name: Live integration tests (Python 3.14.10, shard ${{ matrix.shard }}/4)
     needs: integration-gate
     if: needs.integration-gate.outputs.available == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      # Let every shard finish: a failure in one says nothing about the others.
+      fail-fast: false
+      matrix:
+        # PYTEST_SHARD_COUNT below must equal the number of entries.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -120,6 +213,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --group dev --managed-python --python 3.14.10
 
+      # The slowest tests wait on the service, so the work is split across
+      # jobs: cloudsmith_cli/conftest.py deals the tests out by node id, so each
+      # runs in exactly one shard. Every test creates its own uniquely named
+      # resources, so shards do not share state.
       - name: Run live integration tests
         id: pytest
         env:
@@ -128,13 +225,17 @@ jobs:
           PYTEST_CLOUDSMITH_ORGANIZATION: ${{ vars.PYTEST_CLOUDSMITH_ORGANIZATION }}
           PYTEST_CLOUDSMITH_USERNAME: ${{ secrets.PYTEST_CLOUDSMITH_USERNAME }}
           PYTEST_CLOUDSMITH_PASSWORD: ${{ secrets.PYTEST_CLOUDSMITH_PASSWORD }}
-        run: uv run pytest -m integration --junitxml=./reports/pytest.xml
+          SHARD: ${{ matrix.shard }}
+          PYTEST_SHARD_COUNT: "4"
+        run: |
+          export PYTEST_SHARD_INDEX=$((SHARD - 1))
+          uv run pytest -m integration --durations=10 --junitxml=./reports/pytest.xml
 
       - name: Upload test results
         if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: test-results-integration-3.12
+          name: test-results-integration-3.14-shard-${{ matrix.shard }}
           path: ./reports/pytest.xml
           retention-days: 30
           if-no-files-found: error
