@@ -1,5 +1,4 @@
 import json
-import time
 
 import pytest
 
@@ -8,7 +7,7 @@ from ...commands.delete import delete
 from ...commands.list_ import list_
 from ...commands.push import push
 from ...commands.status import status
-from ..utils import random_str
+from ..utils import random_str, wait_until
 
 
 @pytest.mark.usefixtures("set_api_key_env_var", "set_api_host_env_var")
@@ -60,25 +59,29 @@ def test_push_and_delete_raw_package(
 
     # Wait for the package to sync.
     org_repo_package = f"{org_repo}/{small_file_data['slug']}"
-    for _ in range(10):
-        time.sleep(5)
-        result = runner.invoke(status, args=[org_repo_package], catch_exceptions=False)
-        if "Fully Synchronised" in result.output:
-            break
-    else:
-        raise TimeoutError("Test timed out waiting for package sync")
+    wait_until(
+        lambda: (
+            "Fully Synchronised"
+            in runner.invoke(
+                status, args=[org_repo_package], catch_exceptions=False
+            ).output
+        ),
+        "Test timed out waiting for package sync",
+    )
 
     # Delete the package.
     runner.invoke(delete, args=["-y", org_repo_package], catch_exceptions=False)
 
     # Wait for package deletion to take effect.
-    for _ in range(10):
-        time.sleep(5)
-        result = runner.invoke(status, args=[org_repo_package], catch_exceptions=False)
-        if "status: 404 - Not Found" in result.output:
-            break
-    else:
-        raise TimeoutError("Test timed out waiting for package deletion")
+    wait_until(
+        lambda: (
+            "status: 404 - Not Found"
+            in runner.invoke(
+                status, args=[org_repo_package], catch_exceptions=False
+            ).output
+        ),
+        "Test timed out waiting for package deletion",
+    )
 
     # List packages again - should be empty.
     result = runner.invoke(
@@ -114,15 +117,13 @@ def test_list_packages_with_sort(runner, organization, tmp_repository, tmp_path)
         pkg_slug = next(pkg["slug"] for pkg in data if pkg["filename"] == pkg_file.name)
         org_repo_package = f"{org_repo}/{pkg_slug}"
 
-        for _ in range(10):
-            time.sleep(5)
-            result = runner.invoke(
-                status, args=[org_repo_package], catch_exceptions=False
-            )
-            if "Fully Synchronised" in result.output:
-                break
-        else:
-            raise TimeoutError("Test timed out waiting for package sync")
+        wait_until(
+            lambda pkg=org_repo_package: (
+                "Fully Synchronised"
+                in runner.invoke(status, args=[pkg], catch_exceptions=False).output
+            ),
+            "Test timed out waiting for package sync",
+        )
 
     # Test ascending sort by name
     result = runner.invoke(
@@ -163,12 +164,10 @@ def test_list_packages_with_sort(runner, organization, tmp_repository, tmp_path)
         runner.invoke(delete, args=["-y", org_repo_package], catch_exceptions=False)
 
         # Wait for deletion
-        for _ in range(10):
-            time.sleep(5)
-            result = runner.invoke(
-                status, args=[org_repo_package], catch_exceptions=False
-            )
-            if "status: 404 - Not Found" in result.output:
-                break
-        else:
-            raise TimeoutError("Test timed out waiting for package deletion")
+        wait_until(
+            lambda pkg=org_repo_package: (
+                "status: 404 - Not Found"
+                in runner.invoke(status, args=[pkg], catch_exceptions=False).output
+            ),
+            "Test timed out waiting for package deletion",
+        )

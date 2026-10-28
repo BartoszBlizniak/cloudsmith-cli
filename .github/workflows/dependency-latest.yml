@@ -1,0 +1,70 @@
+name: Dependency latest
+
+# The Test workflow runs against uv.lock, which is not what a customer gets
+# from pip. This installs the wheel with every dependency at the newest
+# release pyproject.toml allows, ignoring the lock, then runs the smoke checks
+# and the unit tests. It fails when a new upstream release breaks the CLI.
+#
+# It runs on every pull request, because a code change can start using an API
+# that a newer release removed, and every day, so that a bad upstream release
+# is noticed without waiting for the next pull request. It is not a required
+# check: it can turn red because of events outside the pull request.
+
+on:
+  pull_request:
+    branches:
+      - "**"
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-latest-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  highest:
+    name: Newest allowed versions (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11.18', '3.12.16', '3.13.18', '3.14.10']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Build the wheel
+        run: uv build --wheel --out-dir dist
+
+      - name: Install the newest allowed versions
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          uv venv --managed-python --python "${PYTHON_VERSION}" "${RUNNER_TEMP}/highest"
+          # One call, so the test tools take part in the resolution.
+          uv pip install --python "${RUNNER_TEMP}/highest/bin/python" \
+            --all-extras -r pyproject.toml pytest-cov freezegun httpretty
+          uv pip install --python "${RUNNER_TEMP}/highest/bin/python" --no-deps dist/*.whl
+          uv pip check --python "${RUNNER_TEMP}/highest/bin/python"
+          uv pip list --python "${RUNNER_TEMP}/highest/bin/python"
+
+      - name: Smoke test the installed wheel
+        run: >-
+          "${RUNNER_TEMP}/highest/bin/python" -I .github/scripts/smoke_installed.py
+          --pyproject pyproject.toml --declared-imports
+
+      - name: Run the unit tests
+        run: >-
+          "${RUNNER_TEMP}/highest/bin/python" -m pytest -m "not integration"
+          -p no:cacheprovider
